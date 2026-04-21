@@ -1,0 +1,137 @@
+"""장기미접속 회원 등급 조정 서비스."""
+from __future__ import annotations
+
+from datetime import date
+from typing import Callable, Optional
+
+from dateutil.relativedelta import relativedelta
+
+from config import INACTIVITY_MONTHS, LEVEL_TRANSITIONS
+from core.crawler import MemberCrawler
+from core.member_admin import MemberAdminAdapter
+from core.models import (
+    AdjustmentItem,
+    AdjustmentPlan,
+    AdjustmentReport,
+    Member,
+)
+
+
+ProgressCB = Callable[[int, int], None]
+
+
+class LevelAdjustmentService:
+    INACTIVITY_MONTHS = INACTIVITY_MONTHS
+    LEVEL_TRANSITIONS = LEVEL_TRANSITIONS
+
+    def __init__(
+        self,
+        crawler: MemberCrawler,
+        admin: MemberAdminAdapter,
+        admin_user_id: str,
+        cutoff_provider: Optional[Callable[[], date]] = None,
+        log_writer=None,
+    ) -> None:
+        self.crawler = crawler
+        self.admin = admin
+        self.admin_user_id = (admin_user_id or "").lower()
+        self.cutoff_provider = cutoff_provider or (
+            lambda: date.today() - relativedelta(months=self.INACTIVITY_MONTHS)
+        )
+        self.log_writer = log_writer
+
+    def build_plan(
+        self,
+        progress_cb: Optional[ProgressCB] = None,
+        members: Optional[list[Member]] = None,
+    ) -> AdjustmentPlan:
+        if members is None:
+            members = self.crawler.fetch_all_members(progress_cb=progress_cb)
+        cutoff = self.cutoff_provider()
+
+        items: list[AdjustmentItem] = []
+        for m in members:
+            # 본인 절대 제외
+            if m.user_id.lower() == self.admin_user_id:
+                continue
+            # 9, 10 레벨 절대 제외
+            if m.level not in self.LEVEL_TRANSITIONS:
+                continue
+
+            if m.last_login_date is None:
+                items.append(AdjustmentItem(
+                    member=m,
+                    action="skip",
+                    from_level=m.level,
+                    to_level=None,
+                    reason="마지막 접속일 파싱 실패 — 안전을 위해 제외",
+                ))
+                continue
+
+            if m.last_login_date > cutoff:
+                # 6개월 이내 접속 → 조정 안 함
+                continue
+
+            action, to_level = self.LEVEL_TRANSITIONS[m.level]
+            days = (date.today() - m.last_login_date).days
+            reason = f"{days}일 미접속 (기준: {cutoff.isoformat()} 이전)"
+            items.append(AdjustmentItem(
+                member=m,
+                action=action,
+                from_level=m.level,
+                to_level=to_level,
+                reason=reason,
+            ))
+
+        return AdjustmentPlan(
+            items=items,
+            total_scanned=len(members),
+            cutoff_date=cutoff,
+        )
+
+    def apply_plan(
+        self,
+        plan: AdjustmentPlan,
+        progress_cb: Optional[ProgressCB] = None,
+    ) -> AdjustmentReport:
+        report = AdjustmentReport(dry_run=self.admin.dry_run)
+        actionable = plan.actionable
+        if not actionable:
+            return report
+
+        # 사이트가 일괄 폼을 지원하므로 한 번의 POST 로 모든 변경 처리
+        level_map = {
+            item.member.user_id: item.to_level
+            for item in actionable
+            if item.to_level is not None
+        }
+
+        if progress_cb:
+            try:
+                progress_cb(1, 1)
+            except Exception:
+                pass
+
+        result = self.admin.bulk_apply(
+            level_map,
+            action_label=f"장기미접속 일괄 조정 ({len(level_map)}명)",
+        )
+
+        if result.success:
+            for item in actionable:
+                if item.action == "delete":
+                    report.succeeded_delete.append(item.member)
+                else:
+                    report.succeeded_demote.append(item.member)
+        else:
+            for item in actionable:
+                report.failed.append((item.member, result.message))
+
+        if self.log_writer:
+            try:
+                for item in actionable:
+                    self.log_writer.write_action(item, result)
+            except Exception:
+                pass
+
+        return report

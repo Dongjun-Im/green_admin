@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+.venv*/
+venv/
+env/
+
+# PyInstaller build artifacts
+build/
+dist/
+
+# Sensitive runtime data — DO NOT COMMIT
+# - data/dumps/: 관리자 페이지 HTML 덤프 (회원 개인정보 포함)
+# - data/logs/: 작업 로그 (회원 식별 정보 포함)
+# - data/last_run.json: 런타임 상태
+# - backups/: 우수회원 명단, 장기미접속 조정 계획 (개인정보)
+data/dumps/
+data/logs/
+data/last_run.json
+backups/
+
+# Sensitive user credentials (if green_auth writes here)
+data/credentials.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+Thumbs.db
+.DS_Store
