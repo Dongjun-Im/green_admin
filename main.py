@@ -24,7 +24,7 @@ class ChorokGreenAdminApp(wx.App):
         self._play_sound("startup.wav")
 
         # 1) 인증
-        result = run_authentication_with_user()
+        result = run_authentication_with_user(APP_NAME)
         if result is None:
             return False
         self.session, self.user_id = result
