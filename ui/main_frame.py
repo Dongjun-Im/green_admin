@@ -18,9 +18,18 @@ from config import (
     DUMPS_DIR,
     LOGS_DIR,
 )
+from core.backup_retention import DEFAULT_RETENTION_MONTHS, archive_old_backups
 from core.backup_service import BackupService
 from core.crawler import MemberCrawler
+from core.html_report import default_report_path, write_report
+from core.keybindings import (
+    KEYBINDINGS_FILE,
+    build_accelerator_entries,
+    load_user_bindings,
+    write_template,
+)
 from core.level_adjustment import LevelAdjustmentService
+from core.level_history import LevelHistoryStore
 from core.log_writer import OperationLogWriter
 from core.mail_sender import (
     MailSender,
@@ -30,15 +39,28 @@ from core.mail_sender import (
 )
 from core.member_admin import MemberAdminAdapter
 from core.member_parser import EmptyParseError, MemberListParser
+from core.site_diagnostics import diagnose_admin_member_html
+from core.update_check import check_for_updates
 from core.models import AdjustmentPlan, AdjustmentReport, BackupResult
+from core.mvp_service import MvpReport, MvpService, write_mvp_report
+from core.pending_members import PendingSeenStore, find_pending
 from core.promotion_service import PromotionPlan, PromotionReport, PromotionService
 from core.schedule_tracker import ScheduleTracker
+from core.undo_stack import UndoEntry, UndoItem, UndoStack
 from screen_reader import cancel_speech, speak
+from ui.backup_diff_dialog import BackupDiffDialog
 from ui.confirm_dialog import ConfirmAdjustmentDialog
+from ui.confirm_promotion_dialog import ConfirmPromotionDialog
+from ui.level_history_dialog import LevelHistoryDialog
 from ui.help_dialog import HelpDialog, show_about
 from ui.item_text_ctrl import ItemTextCtrl
+from ui.log_viewer_dialog import LogViewerDialog
 from ui.mail_dialog import ManualMailDialog
+from ui.mvp_dialog import MvpDialog
+from ui.pending_member_dialog import PendingMemberDialog
+from ui.promotion_imminent_dialog import PromotionImminentDialog
 from ui.search_dialog import MemberSearchDialog
+from ui.stats_dialog import StatsDialog
 
 
 # 메뉴 ID
@@ -55,6 +77,20 @@ ID_OPEN_LOG = wx.NewIdRef()
 ID_LOGOUT = wx.NewIdRef()
 ID_DUMP = wx.NewIdRef()
 ID_HELP_KEYS = wx.NewIdRef()
+ID_STATS = wx.NewIdRef()
+ID_BACKUP_DIFF = wx.NewIdRef()
+ID_LOG_VIEWER = wx.NewIdRef()
+ID_UNDO_LAST = wx.NewIdRef()
+ID_ARCHIVE_OLD_BACKUPS = wx.NewIdRef()
+ID_PROMOTION_IMMINENT = wx.NewIdRef()
+ID_HTML_REPORT = wx.NewIdRef()
+ID_KEYBINDINGS_OPEN = wx.NewIdRef()
+ID_MVP_NOW = wx.NewIdRef()
+ID_PENDING_MEMBERS = wx.NewIdRef()
+ID_PENDING_RESET_SEEN = wx.NewIdRef()
+ID_LEVEL_HISTORY = wx.NewIdRef()
+ID_SITE_DIAGNOSE = wx.NewIdRef()
+ID_CHECK_UPDATE = wx.NewIdRef()
 
 
 class MainFrame(wx.Frame):
@@ -80,9 +116,13 @@ class MainFrame(wx.Frame):
 
         self._busy = False
         self._last_plan: AdjustmentPlan | None = None
+        self._last_promo_plan: PromotionPlan | None = None
         self._cached_members: list | None = None
         self._last_adjust_report: AdjustmentReport | None = None
         self._last_promo_report: PromotionReport | None = None
+        self.undo_stack = UndoStack()
+        self.pending_seen = PendingSeenStore()
+        self.level_history = LevelHistoryStore()
 
         self._build_menu()
         self._build_ui()
@@ -103,6 +143,10 @@ class MainFrame(wx.Frame):
         file_menu.AppendSeparator()
         file_menu.Append(ID_OPEN_BACKUP, "백업 폴더 열기(&O)\tCtrl+O")
         file_menu.Append(ID_OPEN_LOG, "로그 폴더 열기(&G)")
+        file_menu.Append(ID_LOG_VIEWER, "작업 로그 뷰어(&V)...\tCtrl+Shift+L")
+        file_menu.Append(ID_LEVEL_HISTORY, "등급 변경 이력(&Y)...\tCtrl+Shift+Y")
+        file_menu.Append(ID_BACKUP_DIFF, "백업 비교(&D)...\tCtrl+Shift+D")
+        file_menu.Append(ID_ARCHIVE_OLD_BACKUPS, "오래된 백업 정리(&A)...")
         file_menu.AppendSeparator()
         file_menu.Append(ID_LOGOUT, "로그아웃(&L)\tCtrl+L")
         file_menu.Append(wx.ID_EXIT, "프로그램 종료(&X)\tAlt+F4")
@@ -110,12 +154,17 @@ class MainFrame(wx.Frame):
 
         task_menu = wx.Menu()
         task_menu.Append(ID_SEARCH, "회원 검색(&F)\tCtrl+F")
+        task_menu.Append(ID_STATS, "회원 통계(&S)\tCtrl+T")
+        task_menu.Append(ID_PENDING_MEMBERS, "신규 가입자 승인(&E)...")
+        task_menu.Append(ID_PROMOTION_IMMINENT, "승급 임박 회원 분석(&Q)...")
+        task_menu.Append(ID_MVP_NOW, "MVP TOP 10 분석(&V)...")
         task_menu.AppendSeparator()
         task_menu.Append(ID_BACKUP_NOW, "우수회원 백업 실행(&B)\tCtrl+B")
         task_menu.Append(
             ID_PROMOTE_NOW,
             "게시물 기반 자동 승급(&U)\tCtrl+U",
         )
+        task_menu.Append(ID_HTML_REPORT, "HTML 리포트 만들기(&H)...")
         task_menu.AppendSeparator()
         task_menu.Append(ID_ADJUST_PREVIEW, "장기미접속 조정 — 미리보기(&P)\tCtrl+R")
         task_menu.Append(
@@ -128,16 +177,22 @@ class MainFrame(wx.Frame):
             "수동 메일 발송 (rtgreen 전용)(&M)\tCtrl+M",
         )
         task_menu.AppendSeparator()
+        task_menu.Append(ID_UNDO_LAST, "마지막 작업 되돌리기(&Z)\tCtrl+Z")
+        task_menu.AppendSeparator()
         task_menu.Append(ID_CHECK_DUE, "지금 작업 가능 여부 확인(&C)\tCtrl+D")
         bar.Append(task_menu, "작업(&T)")
 
         dev_menu = wx.Menu()
         dev_menu.Append(ID_DUMP, "관리자 페이지 HTML 덤프(&H)")
+        dev_menu.Append(ID_SITE_DIAGNOSE, "사이트 구조 진단(&D)")
+        dev_menu.Append(ID_PENDING_RESET_SEEN, "신규 가입자 '본 적 있음' 기록 초기화")
         bar.Append(dev_menu, "개발자(&D)")
 
         help_menu = wx.Menu()
         help_menu.Append(wx.ID_ABOUT, "프로그램 정보(&A)\tF1")
         help_menu.Append(ID_HELP_KEYS, "단축키 안내(&K)\tCtrl+K")
+        help_menu.Append(ID_KEYBINDINGS_OPEN, "단축키 설정 파일(&B)...")
+        help_menu.Append(ID_CHECK_UPDATE, "업데이트 확인(&U)")
         bar.Append(help_menu, "도움말(&H)")
 
         self.SetMenuBar(bar)
@@ -156,7 +211,24 @@ class MainFrame(wx.Frame):
         self.Bind(wx.EVT_MENU, self.on_dump, id=ID_DUMP)
         self.Bind(wx.EVT_MENU, self.on_about, id=wx.ID_ABOUT)
         self.Bind(wx.EVT_MENU, self.on_help_keys, id=ID_HELP_KEYS)
+        self.Bind(wx.EVT_MENU, self.on_stats, id=ID_STATS)
+        self.Bind(wx.EVT_MENU, self.on_backup_diff, id=ID_BACKUP_DIFF)
+        self.Bind(wx.EVT_MENU, self.on_log_viewer, id=ID_LOG_VIEWER)
+        self.Bind(wx.EVT_MENU, self.on_undo_last, id=ID_UNDO_LAST)
+        self.Bind(wx.EVT_MENU, self.on_archive_old_backups, id=ID_ARCHIVE_OLD_BACKUPS)
+        self.Bind(wx.EVT_MENU, self.on_promotion_imminent, id=ID_PROMOTION_IMMINENT)
+        self.Bind(wx.EVT_MENU, self.on_html_report, id=ID_HTML_REPORT)
+        self.Bind(wx.EVT_MENU, self.on_keybindings_open, id=ID_KEYBINDINGS_OPEN)
+        self.Bind(wx.EVT_MENU, self.on_mvp_now, id=ID_MVP_NOW)
+        self.Bind(wx.EVT_MENU, self.on_pending_members, id=ID_PENDING_MEMBERS)
+        self.Bind(wx.EVT_MENU, self.on_pending_reset_seen, id=ID_PENDING_RESET_SEEN)
+        self.Bind(wx.EVT_MENU, self.on_level_history, id=ID_LEVEL_HISTORY)
+        self.Bind(wx.EVT_MENU, self.on_site_diagnose, id=ID_SITE_DIAGNOSE)
+        self.Bind(wx.EVT_MENU, self.on_check_update, id=ID_CHECK_UPDATE)
         self.Bind(wx.EVT_MENU, self._on_close, id=wx.ID_EXIT)
+
+        # 사용자 정의 단축키 (data/keybindings.json) 적용
+        self._apply_user_keybindings()
 
     def _build_ui(self) -> None:
         panel = wx.Panel(self)
@@ -215,8 +287,10 @@ class MainFrame(wx.Frame):
     def _refresh_status(self) -> None:
         last_b = self.tracker.last_backup_date()
         last_a = self.tracker.last_adjustment_date()
+        last_m = self.tracker.last_mvp_date()
         next_b = self.tracker.next_backup_date()
         next_a = self.tracker.next_adjustment_date()
+        next_m = self.tracker.next_mvp_date()
         b_due = (
             "지금 가능"
             if self.tracker.is_backup_due()
@@ -227,9 +301,15 @@ class MainFrame(wx.Frame):
             if self.tracker.is_adjustment_due()
             else f"{next_a.isoformat()} ({self.tracker.days_until_adjustment()}일 후)"
         )
+        m_due = (
+            "지금 가능"
+            if self.tracker.is_mvp_due()
+            else f"{next_m.isoformat()} ({self.tracker.days_until_mvp()}일 후)"
+        )
         text = (
             f"마지막 백업: {last_b or '기록 없음'}   다음 백업: {b_due}\n"
-            f"마지막 조정: {last_a or '기록 없음'}   다음 조정: {a_due}"
+            f"마지막 조정: {last_a or '기록 없음'}   다음 조정: {a_due}\n"
+            f"마지막 MVP:  {last_m or '기록 없음'}   다음 MVP:  {m_due}"
         )
         self.status_text.SetValue(text)
 
@@ -414,6 +494,7 @@ class MainFrame(wx.Frame):
             mail_sender=self.mail_sender,
             last_adjust_report=self._last_adjust_report,
             last_promo_report=self._last_promo_report,
+            members=self._cached_members or [],
         )
         dlg.ShowModal()
         dlg.Destroy()
@@ -445,26 +526,38 @@ class MainFrame(wx.Frame):
 
     def _show_search_dialog(self, members) -> None:
         self.SetStatusText(f"회원 {len(members)}명 수집 완료", 0)
-        dlg = MemberSearchDialog(self, members)
+        dlg = MemberSearchDialog(
+            self,
+            members,
+            session=self.session,
+            admin_user_id=self.admin_user_id,
+            log_writer=self.log_writer,
+            undo_stack=self.undo_stack,
+            level_history=self.level_history,
+        )
         dlg.ShowModal()
+        if dlg.changed_count > 0:
+            self.SetStatusText(
+                f"등급 {dlg.changed_count}건 수동 변경됨", 0
+            )
+            self.result_text.SetValue(
+                f"회원 검색에서 {dlg.changed_count}건의 등급이 수동 변경되었습니다."
+            )
         dlg.Destroy()
 
     def on_promote_now(self, event=None) -> None:
+        """게시물 기반 자동 승급 — 미리보기 단계로 진입.
+
+        v0.4 부터는 장기미접속 조정과 동일하게 2단계 워크플로:
+        1) 회원 수집 + 게시물 수 카운트 + dry-run plan 생성
+        2) 미리보기 다이얼로그 → 사용자 승인 → 실제 적용
+        """
         if self._busy:
             speak("다른 작업이 진행 중입니다.")
             return
-        confirm = wx.MessageBox(
-            "게시물 50건 이상인 일반회원을 우수회원으로 승급합니다.\n"
-            "승급은 사이트에 즉시 반영되며 되돌릴 수 없습니다.\n"
-            "계속하시겠습니까?",
-            "우수회원 자동 승급",
-            wx.YES_NO | wx.ICON_QUESTION,
-        )
-        if confirm != wx.YES:
-            return
-        self._run_in_thread(self._do_promote_only, label="우수회원 승급")
+        self._run_in_thread(self._do_promotion_preview, label="자동 승급 미리보기")
 
-    def _do_promote_only(self) -> None:
+    def _do_promotion_preview(self) -> None:
         speak("회원 목록을 수집한 뒤 '우리들의 이야기' 게시물 수를 분석합니다.")
         wx.CallAfter(self.SetStatusText, "회원 수집 중...", 0)
         try:
@@ -476,11 +569,114 @@ class MainFrame(wx.Frame):
             wx.CallAfter(self._report_error, f"수집 실패: {e}")
             return
         self._cached_members = members
+
+        # dry-run plan 생성 (사이트에는 아직 아무 변경 없음)
         try:
-            report = self._run_promotion_with_members(members)
+            admin = MemberAdminAdapter(self.session, dry_run=True)
+            service = PromotionService(
+                self.crawler,
+                admin,
+                admin_user_id=self.admin_user_id,
+                log_writer=self.log_writer,
+            )
+            plan = service.build_plan(
+                members=members,
+                progress_cb=self._page_progress_cb,
+            )
         except Exception as e:
-            wx.CallAfter(self._report_error, f"승급 실패: {e}")
+            wx.CallAfter(self._report_error, f"승급 분석 실패: {e}")
             return
+
+        self._last_promo_plan = plan
+        wx.CallAfter(self._show_promotion_preview, plan)
+
+    def _show_promotion_preview(self, plan: PromotionPlan) -> None:
+        self.SetStatusText("자동 승급 미리보기 준비됨", 0)
+        if not plan.items:
+            speak("승급 대상이 없습니다.")
+            wx.MessageBox(
+                f"전체 {plan.total_scanned}명 중 승급 대상이 0건입니다.",
+                "자동 승급 미리보기",
+                wx.OK | wx.ICON_INFORMATION,
+            )
+            return
+
+        dlg = ConfirmPromotionDialog(self, plan)
+        result = dlg.ShowModal()
+        dlg.Destroy()
+        if result != wx.ID_OK:
+            speak("자동 승급을 취소했습니다.")
+            return
+
+        # 최종 확인 한 번 더
+        confirm = wx.MessageBox(
+            f"정말로 {len(plan.items)}명을 승급하시겠습니까?\n\n"
+            f"이 작업은 사이트에 즉시 반영됩니다.\n"
+            f"적용 후 Ctrl+Z 로 되돌릴 수 있습니다.",
+            "최종 확인",
+            wx.YES_NO | wx.ICON_WARNING | wx.NO_DEFAULT,
+        )
+        if confirm != wx.YES:
+            speak("적용을 취소했습니다.")
+            return
+
+        self._run_in_thread(
+            lambda: self._do_apply_promotion_plan(plan),
+            label="자동 승급 적용",
+        )
+
+    def _do_apply_promotion_plan(self, plan: PromotionPlan) -> None:
+        speak("자동 승급을 실제 적용합니다.")
+        wx.CallAfter(self.SetStatusText, "자동 승급 적용 중...", 0)
+        admin = MemberAdminAdapter(self.session, dry_run=False)
+        service = PromotionService(
+            self.crawler,
+            admin,
+            admin_user_id=self.admin_user_id,
+            log_writer=self.log_writer,
+        )
+        try:
+            report = service.apply_plan(plan, progress_cb=self._item_progress_cb)
+        except Exception as e:
+            wx.CallAfter(self._report_error, f"적용 실패: {e}")
+            return
+
+        # Undo 스택에 push
+        if report.succeeded:
+            self.undo_stack.push(
+                label=f"자동 승급 ({len(report.succeeded)}명)",
+                items=[
+                    UndoItem(
+                        user_id=it.member.user_id,
+                        nickname=it.member.nickname,
+                        from_level=it.from_level,
+                        to_level=it.to_level,
+                    )
+                    for it in report.succeeded
+                ],
+            )
+            # v1.0: 영구 등급 이력 기록
+            try:
+                self.level_history.record_batch(
+                    [
+                        {
+                            "user_id": it.member.user_id,
+                            "nickname": it.member.nickname,
+                            "from_level": it.from_level,
+                            "to_level": it.to_level,
+                            "reason": (
+                                f"활동점수 {it.score:.1f} "
+                                f"(글 {it.post_count}/댓글 {it.comment_count})"
+                            ),
+                        }
+                        for it in report.succeeded
+                    ],
+                    source="auto_promote",
+                    actor=self.admin_user_id,
+                )
+            except Exception:
+                pass
+
         wx.CallAfter(self._after_promotion_only, report)
 
     def _after_promotion_only(self, report: PromotionReport) -> None:
@@ -591,6 +787,54 @@ class MainFrame(wx.Frame):
                 demoted=len(report.succeeded_demote),
                 deleted=len(report.succeeded_delete),
             )
+
+        # Undo 스택에 성공한 변경분만 push
+        undo_items: list[UndoItem] = []
+        for m in report.succeeded_demote:
+            # plan 에서 to_level 을 다시 조회
+            plan_item = next(
+                (i for i in plan.items if i.member.user_id == m.user_id),
+                None,
+            )
+            if plan_item and plan_item.to_level is not None:
+                undo_items.append(UndoItem(
+                    user_id=m.user_id, nickname=m.nickname,
+                    from_level=plan_item.from_level, to_level=plan_item.to_level,
+                ))
+        for m in report.succeeded_delete:
+            plan_item = next(
+                (i for i in plan.items if i.member.user_id == m.user_id),
+                None,
+            )
+            if plan_item and plan_item.to_level is not None:
+                undo_items.append(UndoItem(
+                    user_id=m.user_id, nickname=m.nickname,
+                    from_level=plan_item.from_level, to_level=plan_item.to_level,
+                ))
+        if undo_items:
+            self.undo_stack.push(
+                label=f"장기미접속 조정 ({len(undo_items)}명)",
+                items=undo_items,
+            )
+            # v1.0: 영구 등급 이력 기록
+            try:
+                self.level_history.record_batch(
+                    [
+                        {
+                            "user_id": it.user_id,
+                            "nickname": it.nickname,
+                            "from_level": it.from_level,
+                            "to_level": it.to_level,
+                            "reason": "6개월 이상 미접속",
+                        }
+                        for it in undo_items
+                    ],
+                    source="level_adjust",
+                    actor=self.admin_user_id,
+                )
+            except Exception:
+                pass
+
         wx.CallAfter(self._after_apply, report)
 
     def _after_apply(self, report: AdjustmentReport) -> None:
@@ -739,14 +983,611 @@ class MainFrame(wx.Frame):
         dlg.ShowModal()
         dlg.Destroy()
 
+    # ---------- v0.4 신규: 통계 / 백업 비교 / 로그 뷰어 ----------
+
+    def on_stats(self, event=None) -> None:
+        dlg = StatsDialog(self, members=self._cached_members or [])
+        dlg.ShowModal()
+        dlg.Destroy()
+
+    def on_backup_diff(self, event=None) -> None:
+        dlg = BackupDiffDialog(self)
+        dlg.ShowModal()
+        dlg.Destroy()
+
+    def on_log_viewer(self, event=None) -> None:
+        dlg = LogViewerDialog(self)
+        dlg.ShowModal()
+        dlg.Destroy()
+
+    def on_level_history(self, event=None) -> None:
+        dlg = LevelHistoryDialog(self, store=self.level_history)
+        dlg.ShowModal()
+        dlg.Destroy()
+
+    # ---------- 업데이트 확인 (v1.0) ----------
+
+    def on_check_update(self, event=None) -> None:
+        """수동: 캐시 무시하고 강제 확인."""
+        self._run_in_thread(
+            lambda: self._do_check_update(force=True, silent_when_uptodate=False),
+            label="업데이트 확인",
+        )
+
+    def check_update_in_background(self) -> None:
+        """시작 시: 24시간 캐시 사용, 최신이면 조용히 넘어감."""
+        self._run_in_thread(
+            lambda: self._do_check_update(force=False, silent_when_uptodate=True),
+            label="업데이트 자동 확인",
+        )
+
+    def _do_check_update(self, force: bool, silent_when_uptodate: bool) -> None:
+        info = check_for_updates(force=force)
+        if info is None:
+            if silent_when_uptodate:
+                return
+            wx.CallAfter(
+                wx.MessageBox,
+                "현재 최신 버전입니다.",
+                "업데이트 확인",
+                wx.OK | wx.ICON_INFORMATION,
+            )
+            return
+        wx.CallAfter(self._show_update_info, info)
+
+    def _show_update_info(self, info) -> None:
+        speak(info.speak_summary())
+        body = (
+            f"새 버전 {info.latest} 가 사용 가능합니다.\n"
+            f"현재 버전: {info.current}\n\n"
+            f"{info.name}\n\n"
+            f"{info.body}\n\n"
+            f"릴리스 페이지를 지금 여시겠습니까?\n{info.release_url}"
+        )
+        ans = wx.MessageBox(
+            body, "새 버전 알림",
+            wx.YES_NO | wx.ICON_INFORMATION,
+        )
+        if ans == wx.YES and info.release_url:
+            try:
+                if sys.platform == "win32":
+                    os.startfile(info.release_url)  # noqa: SIM115
+                else:
+                    subprocess.Popen(["xdg-open", info.release_url])
+            except Exception:
+                pass
+
+    # ---------- 사이트 구조 진단 (v1.0) ----------
+
+    def on_site_diagnose(self, event=None) -> None:
+        if self._busy:
+            speak("다른 작업이 진행 중입니다.")
+            return
+        self._run_in_thread(self._do_site_diagnose, label="사이트 진단")
+
+    def _do_site_diagnose(self) -> None:
+        wx.CallAfter(self.SetStatusText, "사이트 진단 중...", 0)
+        try:
+            resp = self.session.get(ADMIN_MEMBER_URL, timeout=20)
+            html = resp.text or ""
+        except Exception as e:
+            wx.CallAfter(self._report_error, f"진단 실패 (네트워크): {e}")
+            return
+        report = diagnose_admin_member_html(html)
+        wx.CallAfter(self._show_site_diagnose, report)
+
+    def _show_site_diagnose(self, report) -> None:
+        text = report.text()
+        self.result_text.SetValue(text)
+        speak(text.split("\n", 1)[0])
+        if report.severity == "error":
+            wx.MessageBox(text, "사이트 진단 — 문제 발견",
+                          wx.OK | wx.ICON_ERROR)
+        elif report.severity == "warning":
+            wx.MessageBox(text, "사이트 진단 — 주의",
+                          wx.OK | wx.ICON_WARNING)
+        else:
+            wx.MessageBox(text, "사이트 진단", wx.OK | wx.ICON_INFORMATION)
+
+    # ---------- Undo ----------
+
+    def on_undo_last(self, event=None) -> None:
+        if self._busy:
+            speak("다른 작업이 진행 중입니다.")
+            return
+
+        entry = self.undo_stack.peek()
+        if entry is None or not entry.items:
+            speak("되돌릴 작업이 없습니다.")
+            wx.MessageBox(
+                "되돌릴 작업이 없습니다.",
+                "되돌리기",
+                wx.OK | wx.ICON_INFORMATION,
+            )
+            return
+
+        # 자기 자신이 포함되었는지 확인 (안전 점검)
+        admin_lower = (self.admin_user_id or "").lower()
+        for it in entry.items:
+            if it.user_id.lower() == admin_lower:
+                wx.MessageBox(
+                    "되돌릴 항목에 본인 계정이 포함되어 있어 거부합니다.",
+                    "되돌리기 거부",
+                    wx.OK | wx.ICON_ERROR,
+                )
+                return
+
+        from datetime import datetime as _dt
+        try:
+            ts = _dt.fromisoformat(entry.timestamp).strftime("%Y-%m-%d %H:%M")
+        except ValueError:
+            ts = entry.timestamp
+
+        confirm = wx.MessageBox(
+            f"가장 최근 작업을 되돌립니다.\n\n"
+            f"  · 시각: {ts}\n"
+            f"  · 작업: {entry.label}\n"
+            f"  · 대상: {len(entry.items)}명\n\n"
+            f"각 회원의 등급을 작업 직전 값으로 일괄 복구합니다.\n"
+            f"계속하시겠습니까?",
+            "마지막 작업 되돌리기",
+            wx.YES_NO | wx.ICON_WARNING | wx.NO_DEFAULT,
+        )
+        if confirm != wx.YES:
+            speak("되돌리기를 취소했습니다.")
+            return
+
+        self._run_in_thread(
+            lambda: self._do_undo(entry),
+            label="Undo 적용",
+        )
+
+    def _do_undo(self, entry: UndoEntry) -> None:
+        speak("되돌리기를 적용합니다.")
+        wx.CallAfter(self.SetStatusText, "되돌리기 적용 중...", 0)
+        admin = MemberAdminAdapter(self.session, dry_run=False)
+        # to_level → from_level 로 복구 (즉, 현재 등급에서 이전 등급으로)
+        level_map = {it.user_id: it.from_level for it in entry.items}
+        result = admin.bulk_apply(
+            level_map,
+            action_label=f"되돌리기 ({len(level_map)}명)",
+        )
+
+        # 로그 — 각 항목을 inverse 액션으로 기록
+        if self.log_writer is not None:
+            try:
+                from core.models import AdjustmentItem
+                from core.models import Member as _Member
+                for it in entry.items:
+                    pseudo = _Member(
+                        user_id=it.user_id,
+                        nickname=it.nickname,
+                        level=it.to_level,
+                        level_label="",
+                    )
+                    audit = AdjustmentItem(
+                        member=pseudo,
+                        action="demote",  # 표시용
+                        from_level=it.to_level,
+                        to_level=it.from_level,
+                        reason=f"되돌리기 ({entry.label})",
+                    )
+                    self.log_writer.write_action(audit, result)
+            except Exception:
+                pass
+
+        # 성공 시에만 스택에서 제거
+        if result.success:
+            self.undo_stack.pop()
+            # v1.0: 영구 이력에는 inverse 항목 (현재→이전등급) 기록
+            try:
+                self.level_history.record_batch(
+                    [
+                        {
+                            "user_id": it.user_id,
+                            "nickname": it.nickname,
+                            "from_level": it.to_level,    # 직전 작업이 to_level 로 바꿔놓은 상태
+                            "to_level": it.from_level,    # 되돌리기로 from_level 로 복구
+                            "reason": f"되돌리기 ({entry.label})",
+                        }
+                        for it in entry.items
+                    ],
+                    source="undo",
+                    actor=self.admin_user_id,
+                )
+            except Exception:
+                pass
+
+        # 캐시된 회원 객체 등급도 갱신
+        if self._cached_members:
+            id_to_from = {it.user_id: it.from_level for it in entry.items}
+            for m in self._cached_members:
+                if m.user_id in id_to_from:
+                    m.level = id_to_from[m.user_id]
+                    from config import LEVEL_LABELS as _LL
+                    m.level_label = _LL.get(m.level, str(m.level))
+
+        wx.CallAfter(self._after_undo, entry, result)
+
+    def _after_undo(self, entry: UndoEntry, result) -> None:
+        if result.success:
+            msg = f"되돌리기 완료: {entry.label} ({len(entry.items)}명)"
+        else:
+            msg = f"되돌리기 실패: {result.message}"
+        self.result_text.SetValue(msg)
+        self.SetStatusText(msg, 0)
+        speak(msg)
+
+    # ---------- 신규 가입자 승인 (v0.5) ----------
+
+    def on_pending_members(self, event=None) -> None:
+        """수동 호출. 캐시가 있으면 즉시, 없으면 새로 수집."""
+        if self._busy:
+            speak("다른 작업이 진행 중입니다.")
+            return
+        if self._cached_members:
+            self._show_pending_dialog(
+                self._cached_members, only_unseen=False
+            )
+            return
+        self._run_in_thread(
+            lambda: self._do_fetch_then_pending(only_unseen=False),
+            label="신규 가입자 수집",
+        )
+
+    def on_pending_reset_seen(self, event=None) -> None:
+        confirm = wx.MessageBox(
+            "신규 가입자 '본 적 있음' 기록을 모두 초기화합니다.\n"
+            "다음 실행 시 모든 미승인 회원이 다시 알림됩니다.\n"
+            "계속하시겠습니까?",
+            "기록 초기화",
+            wx.YES_NO | wx.ICON_QUESTION,
+        )
+        if confirm != wx.YES:
+            return
+        try:
+            self.pending_seen.clear()
+        except Exception as e:
+            wx.MessageBox(f"초기화 실패: {e}", "오류", wx.OK | wx.ICON_ERROR)
+            return
+        speak("신규 가입자 기록을 초기화했습니다.")
+
+    def _do_fetch_then_pending(self, only_unseen: bool) -> None:
+        """회원 목록 수집 후 가입자 다이얼로그 트리거 (백그라운드 스레드용)."""
+        speak("회원 목록을 불러옵니다.")
+        wx.CallAfter(self.SetStatusText, "회원 목록 수집 중...", 0)
+        try:
+            members = self.crawler.fetch_all_members(progress_cb=self._page_progress_cb)
+        except EmptyParseError as e:
+            wx.CallAfter(self._report_error, str(e))
+            return
+        except Exception as e:
+            wx.CallAfter(self._report_error, f"수집 실패: {e}")
+            return
+        self._cached_members = members
+        wx.CallAfter(self._show_pending_dialog, members, only_unseen)
+
+    def _show_pending_dialog(self, members, only_unseen: bool) -> None:
+        """다이얼로그 모달 표시 (메인 스레드에서 호출)."""
+        pendings = find_pending(
+            members,
+            seen_store=self.pending_seen,
+            only_unseen=only_unseen,
+        )
+        if not pendings:
+            speak("처리할 신규 가입자가 없습니다.")
+            self.SetStatusText("신규 가입자 없음", 0)
+            return
+
+        # 알림 박스로 한 번 알리기 — 자동 트리거 흐름에서도 음성으로 안내됨
+        ans = wx.MessageBox(
+            f"신규 가입 신청·대기 회원이 {len(pendings)}명 있습니다.\n"
+            f"지금 한 명씩 승인 또는 거부 처리하시겠습니까?\n\n"
+            f"(아니오 → 메인으로 복귀, 작업 메뉴 → '신규 가입자 승인' 으로 언제든 다시 처리 가능)",
+            "신규 가입자 알림",
+            wx.YES_NO | wx.ICON_QUESTION,
+        )
+        if ans != wx.YES:
+            speak("신규 가입자 처리를 미뤘습니다.")
+            return
+
+        dlg = PendingMemberDialog(
+            self,
+            pendings=pendings,
+            session=self.session,
+            admin_user_id=self.admin_user_id,
+            log_writer=self.log_writer,
+            undo_stack=self.undo_stack,
+            seen_store=self.pending_seen,
+            level_history=self.level_history,
+            mail_sender=self.mail_sender,
+        )
+        dlg.ShowModal()
+        # 결과 보고
+        n_a = len(dlg.approved)
+        n_r = len(dlg.rejected)
+        n_d = len(dlg.deferred)
+        msg = (
+            f"신규 가입자 처리 결과: 승인 {n_a}명 / 거부 {n_r}명 / 미루기 {n_d}명"
+        )
+        self.result_text.SetValue(msg)
+        self.SetStatusText(msg, 0)
+        dlg.Destroy()
+
+    def check_pending_on_startup(self) -> None:
+        """프로그램 시작 직후 자동 호출. 본 적 없는 신규 가입자만 알림."""
+        if self._busy:
+            return
+        # 캐시가 있으면 즉시 사용 (보통 시작 시점엔 비어있음)
+        if self._cached_members:
+            self._show_pending_dialog(self._cached_members, only_unseen=True)
+            return
+        self._run_in_thread(
+            lambda: self._do_fetch_then_pending(only_unseen=True),
+            label="신규 가입자 자동 확인",
+        )
+
+    # ---------- MVP TOP 10 ----------
+
+    def on_mvp_now(self, event=None) -> None:
+        if self._busy:
+            speak("다른 작업이 진행 중입니다.")
+            return
+        self._run_in_thread(self._do_mvp_analysis, label="MVP 분석")
+
+    def _do_mvp_analysis(self) -> None:
+        speak(
+            "회원 목록을 수집한 뒤 우리들의 이야기와 질문게시판의 "
+            "글·댓글을 합산합니다. 일반회원 이상 대상이라 시간이 걸릴 수 있습니다."
+        )
+        wx.CallAfter(self.SetStatusText, "MVP 분석 중...", 0)
+        try:
+            members = self.crawler.fetch_all_members(progress_cb=self._page_progress_cb)
+        except EmptyParseError as e:
+            wx.CallAfter(self._report_error, str(e))
+            return
+        except Exception as e:
+            wx.CallAfter(self._report_error, f"수집 실패: {e}")
+            return
+        self._cached_members = members
+
+        try:
+            service = MvpService(
+                self.crawler,
+                admin_user_id=self.admin_user_id,
+            )
+            report = service.run(
+                members=members,
+                progress_cb=self._item_progress_cb,
+            )
+        except Exception as e:
+            wx.CallAfter(self._report_error, f"MVP 분석 실패: {e}")
+            return
+
+        # 리포트 자동 저장
+        try:
+            saved = write_mvp_report(report)
+        except Exception:
+            saved = None
+
+        # 스케줄 마킹 (성공 케이스만)
+        if report.items:
+            self.tracker.mark_mvp_done(top_n=len(report.items), quarter=report.quarter)
+            self.log_writer.write_event(
+                f"mvp quarter={report.quarter} top_n={len(report.items)}"
+            )
+
+        wx.CallAfter(self._after_mvp, report, saved)
+
+    def _after_mvp(self, report: MvpReport, saved_path) -> None:
+        self.SetStatusText(f"MVP 분석 완료: {report.quarter}", 0)
+        lines = [report.speak_summary()]
+        if saved_path is not None:
+            lines.append(f"저장: {saved_path}")
+        if report.items:
+            lines.append("")
+            for it in report.items:
+                lines.append(it.display())
+        self.result_text.SetValue("\n".join(lines))
+        self._refresh_status()
+        speak(report.speak_summary())
+
+        dlg = MvpDialog(self, report)
+        dlg.ShowModal()
+        dlg.Destroy()
+
+    # ---------- 승급 임박 회원 ----------
+
+    def on_promotion_imminent(self, event=None) -> None:
+        if self._busy:
+            speak("다른 작업이 진행 중입니다.")
+            return
+        dlg = PromotionImminentDialog(self, self.crawler)
+        dlg.ShowModal()
+        dlg.Destroy()
+
+    # ---------- HTML 리포트 ----------
+
+    def on_html_report(self, event=None) -> None:
+        if not self._cached_members:
+            ans = wx.MessageBox(
+                "회원 데이터가 아직 캐시되지 않았습니다.\n"
+                "지금 회원 목록을 새로 수집할까요?",
+                "HTML 리포트",
+                wx.YES_NO | wx.ICON_QUESTION,
+            )
+            if ans != wx.YES:
+                return
+            self._run_in_thread(self._do_fetch_then_report, label="HTML 리포트")
+            return
+        self._render_and_save_report(self._cached_members)
+
+    def _do_fetch_then_report(self) -> None:
+        speak("회원 목록을 수집합니다.")
+        wx.CallAfter(self.SetStatusText, "회원 수집 중...", 0)
+        try:
+            members = self.crawler.fetch_all_members(progress_cb=self._page_progress_cb)
+        except Exception as e:
+            wx.CallAfter(self._report_error, f"수집 실패: {e}")
+            return
+        self._cached_members = members
+        wx.CallAfter(self._render_and_save_report, members)
+
+    def _render_and_save_report(self, members) -> None:
+        try:
+            path = write_report(default_report_path(), members=members)
+        except Exception as e:
+            wx.MessageBox(f"리포트 저장 실패: {e}", "오류", wx.OK | wx.ICON_ERROR)
+            return
+        msg = f"HTML 리포트 저장됨: {path}"
+        self.result_text.SetValue(msg)
+        speak("HTML 리포트를 저장했습니다.")
+        # 사용자에게 열어볼지 묻기
+        ans = wx.MessageBox(
+            f"{path}\n\n지금 브라우저로 열까요?",
+            "HTML 리포트",
+            wx.YES_NO | wx.ICON_INFORMATION,
+        )
+        if ans == wx.YES:
+            try:
+                if sys.platform == "win32":
+                    os.startfile(str(path))  # noqa: SIM115
+                else:
+                    subprocess.Popen(["xdg-open", str(path)])
+            except Exception:
+                pass
+
+    # ---------- 단축키 설정 ----------
+
+    def on_keybindings_open(self, event=None) -> None:
+        try:
+            if not KEYBINDINGS_FILE.exists():
+                write_template(KEYBINDINGS_FILE)
+                wx.MessageBox(
+                    f"기본값으로 단축키 설정 템플릿을 만들었습니다.\n"
+                    f"{KEYBINDINGS_FILE}\n\n"
+                    f"파일을 메모장에서 열어 편집하고 저장한 뒤\n"
+                    f"프로그램을 재시작하면 새 단축키가 적용됩니다.",
+                    "단축키 설정",
+                    wx.OK | wx.ICON_INFORMATION,
+                )
+            if sys.platform == "win32":
+                os.startfile(str(KEYBINDINGS_FILE))  # noqa: SIM115
+            else:
+                subprocess.Popen(["xdg-open", str(KEYBINDINGS_FILE)])
+        except Exception as e:
+            wx.MessageBox(
+                f"파일을 열 수 없습니다: {e}",
+                "오류",
+                wx.OK | wx.ICON_ERROR,
+            )
+
+    def _apply_user_keybindings(self) -> None:
+        """data/keybindings.json 의 사용자 정의 단축키를 AcceleratorTable 로 추가."""
+        bindings = load_user_bindings()
+        if not bindings:
+            return
+        action_to_id: dict[str, int] = {
+            "search":         int(ID_SEARCH),
+            "stats":          int(ID_STATS),
+            "backup":         int(ID_BACKUP_NOW),
+            "promote":        int(ID_PROMOTE_NOW),
+            "adjust_preview": int(ID_ADJUST_PREVIEW),
+            "adjust_apply":   int(ID_ADJUST_APPLY),
+            "manual_mail":    int(ID_MANUAL_MAIL),
+            "check_due":      int(ID_CHECK_DUE),
+            "last_info":      int(ID_LAST_INFO),
+            "open_backup":    int(ID_OPEN_BACKUP),
+            "logout":         int(ID_LOGOUT),
+            "log_viewer":     int(ID_LOG_VIEWER),
+            "backup_diff":    int(ID_BACKUP_DIFF),
+            "undo_last":      int(ID_UNDO_LAST),
+            "help_keys":      int(ID_HELP_KEYS),
+            "promotion_imminent": int(ID_PROMOTION_IMMINENT),
+            "html_report":    int(ID_HTML_REPORT),
+        }
+        try:
+            entries = build_accelerator_entries(bindings, action_to_id)
+            if entries:
+                self.SetAcceleratorTable(wx.AcceleratorTable(entries))
+        except Exception:
+            pass
+
+    # ---------- 백업 보관 정책 ----------
+
+    def on_archive_old_backups(self, event=None) -> None:
+        if self._busy:
+            speak("다른 작업이 진행 중입니다.")
+            return
+        from core.backup_retention import find_old_backup_dirs
+        targets = find_old_backup_dirs(months=DEFAULT_RETENTION_MONTHS)
+        if not targets:
+            speak(f"{DEFAULT_RETENTION_MONTHS}개월 이상 된 백업이 없습니다.")
+            wx.MessageBox(
+                f"{DEFAULT_RETENTION_MONTHS}개월보다 오래된 백업 폴더가 없습니다.",
+                "오래된 백업 정리",
+                wx.OK | wx.ICON_INFORMATION,
+            )
+            return
+
+        sample = "\n".join(f"  · {p.name}" for p in targets[:10])
+        more = f"\n  ... 외 {len(targets) - 10}개" if len(targets) > 10 else ""
+        confirm = wx.MessageBox(
+            f"{len(targets)}개의 오래된 백업 폴더를 zip 으로 압축한 뒤\n"
+            f"원본 폴더를 삭제합니다 (zip 자체는 backups/archives/ 에 보존).\n\n"
+            f"대상:\n{sample}{more}\n\n"
+            f"계속하시겠습니까?",
+            "오래된 백업 정리",
+            wx.YES_NO | wx.ICON_WARNING | wx.NO_DEFAULT,
+        )
+        if confirm != wx.YES:
+            speak("정리를 취소했습니다.")
+            return
+
+        self._run_in_thread(self._do_archive_old_backups, label="백업 압축")
+
+    def _do_archive_old_backups(self) -> None:
+        speak("오래된 백업 폴더 압축을 시작합니다.")
+        wx.CallAfter(self.SetStatusText, "백업 압축 중...", 0)
+        try:
+            result = archive_old_backups(months=DEFAULT_RETENTION_MONTHS)
+        except Exception as e:
+            wx.CallAfter(self._report_error, f"백업 압축 실패: {e}")
+            return
+
+        lines = [f"오래된 백업 정리 결과: {result.summary}"]
+        if result.archived:
+            lines.append("")
+            lines.append("[압축됨]")
+            for name in result.archived:
+                lines.append(f"  · {name}.zip")
+        if result.errors:
+            lines.append("")
+            lines.append("[실패]")
+            for name, msg in result.errors:
+                lines.append(f"  · {name}: {msg}")
+        if result.archive_dir:
+            lines.append("")
+            lines.append(f"보관 위치: {result.archive_dir}")
+
+        wx.CallAfter(self.result_text.SetValue, "\n".join(lines))
+        wx.CallAfter(self.SetStatusText, result.summary, 0)
+        wx.CallAfter(speak, result.summary)
+
     # ---------- 자동 스케줄 ----------
 
     def run_scheduled_tasks_if_due(self) -> None:
+        # v1.0: 업데이트 확인은 항상 백그라운드로
+        self.check_update_in_background()
+
         backup_due = self.tracker.is_backup_due()
         adjust_due = self.tracker.is_adjustment_due()
+        mvp_due = self.tracker.is_mvp_due()
 
-        if not backup_due and not adjust_due:
+        if not backup_due and not adjust_due and not mvp_due:
             self.on_check_due()
+            # 정기 작업이 없을 때도 신규 가입자 확인은 항상 실행
+            wx.CallAfter(self.check_pending_on_startup)
             return
 
         if backup_due:
@@ -755,16 +1596,29 @@ class MainFrame(wx.Frame):
         elif adjust_due:
             speak("6개월 주기 장기미접속 조정 미리보기를 자동 생성합니다.")
             self.on_adjust_preview()
+        elif mvp_due:
+            speak("3개월 주기 MVP 분석을 자동 시작합니다.")
+            self._run_in_thread(self._do_mvp_analysis, label="자동 MVP")
 
     def _do_backup_then_maybe_adjust(self) -> None:
         self._do_backup()
         # 조정이 도래해 있으면 백업 끝난 뒤 미리보기 자동 트리거
         if self.tracker.is_adjustment_due():
             wx.CallAfter(self._auto_trigger_adjust)
+        elif self.tracker.is_mvp_due():
+            wx.CallAfter(self._auto_trigger_mvp)
 
     def _auto_trigger_adjust(self) -> None:
         speak("이어서 6개월 주기 장기미접속 조정 미리보기를 시작합니다.")
         self.on_adjust_preview()
+
+    def _auto_trigger_mvp(self) -> None:
+        speak("이어서 3개월 주기 MVP 분석을 시작합니다.")
+        self._run_in_thread(self._do_mvp_analysis, label="자동 MVP")
+
+    def trigger_pending_check_if_due(self) -> None:
+        """긴 자동 작업이 끝난 뒤 또는 시작 직후에 신규 가입자 알림."""
+        wx.CallAfter(self.check_pending_on_startup)
 
     # ---------- 헬퍼 ----------
 
@@ -789,7 +1643,18 @@ class MainFrame(wx.Frame):
             wx.CallAfter(speak, f"{current} / {total} 진행 중")
 
     def _report_error(self, msg: str) -> None:
-        self.result_text.SetValue(msg)
+        # v1.0: 회원 목록 분석 실패면 사이트 구조 자동 진단 정보를 덧붙인다.
+        diag_text = ""
+        if "회원 목록을 분석" in msg or "수집 실패" in msg:
+            try:
+                resp = self.session.get(ADMIN_MEMBER_URL, timeout=15)
+                report = diagnose_admin_member_html(resp.text or "")
+                if report.findings:
+                    diag_text = "\n\n" + report.text()
+            except Exception:
+                pass
+        full = msg + diag_text
+        self.result_text.SetValue(full)
         self.SetStatusText("오류", 0)
         speak(msg)
-        wx.MessageBox(msg, "오류", wx.OK | wx.ICON_ERROR)
+        wx.MessageBox(full, "오류", wx.OK | wx.ICON_ERROR)

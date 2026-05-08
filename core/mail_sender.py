@@ -8,12 +8,37 @@
 """
 from __future__ import annotations
 
+import mimetypes
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Iterable, Optional
 
 import requests
 
 from config import HTTP_TIMEOUT, MAIL_SENDER_USER_ID, MAIL_WRITE_URL, USER_AGENT
+
+
+def _build_files_payload(attachments: Optional[list]) -> list[tuple]:
+    """첨부파일 경로 목록을 requests 의 files 인자 형식으로 변환.
+
+    그누보드 g5 의 /message/write.php 는 빈 ms_file[] 더미라도 multipart 로
+    POST 받기를 요구하므로 첨부가 없을 때도 빈 part 한 개를 포함한다.
+    """
+    payload: list[tuple] = []
+    if attachments:
+        for raw in attachments:
+            p = Path(raw)
+            if not p.exists() or not p.is_file():
+                continue
+            mime = mimetypes.guess_type(str(p))[0] or "application/octet-stream"
+            payload.append(
+                ("ms_file[]", (p.name, p.read_bytes(), mime))
+            )
+    if not payload:
+        payload.append(
+            ("ms_file[]", ("", b"", "application/octet-stream"))
+        )
+    return payload
 
 
 @dataclass
@@ -26,8 +51,11 @@ class MailResult:
 
 
 # 발송 방식
-SEND_MODE_BULK = "bulk"         # 한 번의 POST 에 수신인 여러 명 (쉼표 구분)
-SEND_MODE_INDIVIDUAL = "individual"  # 회원마다 POST 1번씩
+# v0.5: 일괄(bulk) 발송은 수신자 ID 가 서로에게 노출되어 개인정보 누출 위험.
+#       개별(individual) 발송 한 가지로만 동작한다.
+SEND_MODE_INDIVIDUAL = "individual"
+# 구버전 호환 별칭 — 외부 호출이 SEND_MODE_BULK 를 넘기면 individual 로 안전 전환.
+SEND_MODE_BULK = SEND_MODE_INDIVIDUAL
 
 
 # "명백한 실패" 마커. 이 중 하나라도 응답 본문에 있으면 실패로 판정.
@@ -55,16 +83,19 @@ class MailSender:
         recipients: Iterable[str],
         subject: str,
         body: str,
-        mode: str = SEND_MODE_BULK,
+        mode: str = SEND_MODE_INDIVIDUAL,
+        progress_cb: Optional[callable] = None,
+        attachments: Optional[list] = None,
     ) -> list[MailResult]:
-        """수신인들에게 동일 내용 메일 발송.
+        """수신인들에게 동일 내용 메일을 회원별로 개별 발송.
 
-        mode:
-          - SEND_MODE_BULK: 한 번의 POST 에 여러 수신인을 쉼표로 묶어 전송.
-                            빠르지만 수신자가 서로의 아이디를 볼 수 있음.
-          - SEND_MODE_INDIVIDUAL: 회원마다 별도 POST. 프라이버시 보호.
-                                  회원 수만큼 시간이 걸림.
+        v0.5 부터는 mode 파라미터에 무엇이 들어와도 항상 individual 로 동작.
+        수신자 ID 가 다른 수신자에게 노출되는 것을 막기 위함.
 
+        attachments(v1.0): 첨부파일 경로 목록 (str/Path). 모든 수신자에게
+        동일 첨부 발송. 사이트 ms_file[] 폼 필드를 사용.
+
+        progress_cb(current, total) 으로 진행률을 알릴 수 있다.
         enabled == False 면 MailResult(skipped=True) 를 한 번 반환.
         """
         rec_list = [r for r in recipients if r]
@@ -79,20 +110,25 @@ class MailSender:
             )]
 
         results: list[MailResult] = []
-        if mode == SEND_MODE_INDIVIDUAL:
-            for uid in rec_list:
-                results.append(self._send_chunk([uid], subject, body))
-        else:
-            for start in range(0, len(rec_list), self.CHUNK_SIZE):
-                chunk = rec_list[start:start + self.CHUNK_SIZE]
-                results.append(self._send_chunk(chunk, subject, body))
+        total = len(rec_list)
+        for idx, uid in enumerate(rec_list, start=1):
+            if progress_cb:
+                try:
+                    progress_cb(idx, total)
+                except Exception:
+                    pass
+            results.append(self._send_chunk([uid], subject, body, attachments))
         return results
 
     def _send_chunk(
-        self, chunk: list[str], subject: str, body: str
+        self,
+        chunk: list[str],
+        subject: str,
+        body: str,
+        attachments: Optional[list] = None,
     ) -> MailResult:
-        # /message/write.php 폼은 multipart/form-data. 빈 file part 를 포함해
-        # 서버가 multipart 로 정상 처리하도록 보장.
+        # /message/write.php 폼은 multipart/form-data. 첨부가 있으면 ms_file[]
+        # 로 같이 전송, 없으면 빈 file part 한 개로 multipart 형식만 유지.
         data = {
             "reply": "0",
             "cl": "green",
@@ -100,7 +136,7 @@ class MailSender:
             "ms_subject": subject,
             "ms_content": body,
         }
-        files = {"ms_file[]": ("", b"", "application/octet-stream")}
+        files = _build_files_payload(attachments)
 
         headers = {
             "User-Agent": USER_AGENT,
@@ -198,6 +234,32 @@ def template_promote(member, from_label: str, to_label: str, post_count: int) ->
         f"회원님의 활동에 감사드리며, 등급이 {from_label}에서 {to_label}(으)로 "
         f"승급되었음을 알려드립니다.\n\n"
         f"앞으로도 활발한 활동 부탁드립니다.\n\n"
+        f"감사합니다.\n"
+        f"초록등대 운영진 드림"
+    )
+    return subject, body
+
+
+def template_welcome(member) -> tuple[str, str]:
+    """신규 가입 승인 시 발송되는 환영 메일 (v1.0+)."""
+    nick = member.nickname or member.name or member.user_id
+    subject = "[초록등대] 가입을 진심으로 환영합니다 !"
+    body = (
+        f"{nick} 회원님, 안녕하세요.\n\n"
+        f"초록등대 동호회에 가입해 주셔서 진심으로 감사드립니다.\n"
+        f"운영진의 검토를 거쳐 회원님의 가입이 정식 승인되어\n"
+        f"이제 동호회의 모든 게시판과 활동에 자유롭게 참여하실 수 있습니다.\n\n"
+        f"동호회 활동 안내:\n"
+        f"  · '우리들의 이야기' 게시판에서 일상과 이야기를 나눠 주세요.\n"
+        f"  · '질문게시판' 에서는 궁금한 점을 자유롭게 질문하실 수 있어요.\n"
+        f"  · 글 작성과 댓글 활동에 따라 등급이 차근차근 올라갑니다.\n"
+        f"        - 활동점수 5 이상   → 일반회원\n"
+        f"        - 활동점수 30 이상  → 우수회원\n"
+        f"        - 활동점수 60 이상  → 최우수회원\n"
+        f"        - 활동점수 300 이상 → 명예회원\n"
+        f"      (활동점수 = 글 수 × 1.0 + 댓글 수 × 0.3)\n\n"
+        f"앞으로 초록등대에서 즐겁고 따뜻한 시간을 함께 만들어 가요.\n"
+        f"궁금한 점은 언제든 운영진에게 메일로 문의해 주세요.\n\n"
         f"감사합니다.\n"
         f"초록등대 운영진 드림"
     )

@@ -41,6 +41,24 @@ a = Analysis(
         'core.post_counter',
         'core.post_count_green3',
         'core.mail_sender',
+        # core 패키지 (v0.4 신규)
+        'core.log_reader',
+        'core.backup_diff',
+        'core.backup_retention',
+        'core.undo_stack',
+        'core.member_notes',
+        'core.html_report',
+        'core.keybindings',
+        # core 패키지 (v0.5 신규)
+        'core.activity_counter',
+        'core.mvp_service',
+        'core.pending_members',
+        # core 패키지 (v1.0 신규)
+        'core.level_history',
+        'core.site_diagnostics',
+        'core.update_check',
+        # core 패키지 (v1.0.4 신규)
+        'core.admin_flags',
         # ui 패키지
         'ui',
         'ui.main_frame',
@@ -49,6 +67,21 @@ a = Analysis(
         'ui.help_dialog',
         'ui.search_dialog',
         'ui.mail_dialog',
+        # ui 패키지 (v0.4 신규)
+        'ui.level_change_dialog',
+        'ui.stats_dialog',
+        'ui.backup_diff_dialog',
+        'ui.log_viewer_dialog',
+        'ui.confirm_promotion_dialog',
+        'ui.member_note_dialog',
+        'ui.promotion_imminent_dialog',
+        # ui 패키지 (v0.5 신규)
+        'ui.mvp_dialog',
+        'ui.pending_member_dialog',
+        # ui 패키지 (v1.0 신규)
+        'ui.level_history_dialog',
+        # 표준 라이브러리 (JIT 사용)
+        'sqlite3',
         # 외부 의존성 (동적 import 대비)
         'win32com.client',
         'lxml',

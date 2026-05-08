@@ -54,7 +54,10 @@ class LevelAdjustmentService:
             # 본인 절대 제외
             if m.user_id.lower() == self.admin_user_id:
                 continue
-            # 9, 10 레벨 절대 제외
+            # v1.0.2: 동호회관리자(is_admin) 도 절대 자동 강등 대상이 아님.
+            if getattr(m, "is_admin", False):
+                continue
+            # LEVEL_TRANSITIONS 에 없는 등급(0~4 가입 단계, 9 명예회원)은 절대 제외
             if m.level not in self.LEVEL_TRANSITIONS:
                 continue
 

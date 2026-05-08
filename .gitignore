@@ -13,6 +13,7 @@ env/
 # PyInstaller build artifacts
 build/
 dist/
+dist_*/
 
 # Sensitive runtime data — DO NOT COMMIT
 # - data/dumps/: 관리자 페이지 HTML 덤프 (회원 개인정보 포함)
@@ -23,6 +24,13 @@ data/dumps/
 data/logs/
 data/last_run.json
 backups/
+
+# v0.4 + 신규 사용자 데이터 — 모두 회원 식별 정보 포함
+data/level_history.db
+data/member_notes.db
+data/undo_stack.json
+data/pending_seen.json
+data/admin_flags.json
 
 # Sensitive user credentials (if green_auth writes here)
 data/credentials.ini

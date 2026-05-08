@@ -18,6 +18,7 @@ from config import (
     ADJUSTMENT_INTERVAL_MONTHS,
     BACKUP_INTERVAL_MONTHS,
     LAST_RUN_FILE,
+    MVP_INTERVAL_MONTHS,
 )
 
 
@@ -52,12 +53,14 @@ def next_due_date(today: date, interval_months: int) -> date:
 class ScheduleTracker:
     BACKUP_INTERVAL_MONTHS = BACKUP_INTERVAL_MONTHS
     ADJUSTMENT_INTERVAL_MONTHS = ADJUSTMENT_INTERVAL_MONTHS
+    MVP_INTERVAL_MONTHS = MVP_INTERVAL_MONTHS
 
     def __init__(self, path: Optional[Path] = None) -> None:
         self.path = Path(path or LAST_RUN_FILE)
         self._data: dict = {
             "last_backup": None,
             "last_adjustment": None,
+            "last_mvp": None,
             "history": [],
         }
 
@@ -67,6 +70,7 @@ class ScheduleTracker:
         try:
             self._data = json.loads(self.path.read_text(encoding="utf-8"))
             self._data.setdefault("history", [])
+            self._data.setdefault("last_mvp", None)
         except (OSError, ValueError):
             pass
 
@@ -83,6 +87,9 @@ class ScheduleTracker:
     def last_adjustment_date(self) -> Optional[date]:
         return self._parse(self._data.get("last_adjustment"))
 
+    def last_mvp_date(self) -> Optional[date]:
+        return self._parse(self._data.get("last_mvp"))
+
     # ---- 도래 판단 ----
 
     def is_backup_due(self, today: Optional[date] = None) -> bool:
@@ -98,6 +105,25 @@ class ScheduleTracker:
         if last is None:
             return True
         return last < last_due_date(today, self.ADJUSTMENT_INTERVAL_MONTHS)
+
+    def is_mvp_due(self, today: Optional[date] = None) -> bool:
+        today = today or date.today()
+        last = self.last_mvp_date()
+        if last is None:
+            return True
+        return last < last_due_date(today, self.MVP_INTERVAL_MONTHS)
+
+    def days_until_mvp(self, today: Optional[date] = None) -> int:
+        today = today or date.today()
+        if self.is_mvp_due(today):
+            return 0
+        return (next_due_date(today, self.MVP_INTERVAL_MONTHS) - today).days
+
+    def next_mvp_date(self, today: Optional[date] = None) -> date:
+        today = today or date.today()
+        if self.is_mvp_due(today):
+            return today
+        return next_due_date(today, self.MVP_INTERVAL_MONTHS)
 
     def days_until_backup(self, today: Optional[date] = None) -> int:
         today = today or date.today()
@@ -148,6 +174,22 @@ class ScheduleTracker:
             "date": today.isoformat(),
             "demoted": demoted,
             "deleted": deleted,
+        })
+        self.save()
+
+    def mark_mvp_done(
+        self,
+        top_n: int = 0,
+        quarter: str = "",
+        today: Optional[date] = None,
+    ) -> None:
+        today = today or date.today()
+        self._data["last_mvp"] = today.isoformat()
+        self._data.setdefault("history", []).append({
+            "type": "mvp",
+            "date": today.isoformat(),
+            "top_n": top_n,
+            "quarter": quarter,
         })
         self.save()
 

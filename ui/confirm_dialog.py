@@ -113,7 +113,7 @@ class ConfirmAdjustmentDialog(wx.Dialog):
             f"아이디: {m.user_id}\n"
             f"이름: {m.name}\n"
             f"닉네임: {m.nickname}\n"
-            f"현재 등급: {m.level_label} (레벨 {m.level})\n"
+            f"현재 등급: {LEVEL_LABELS.get(m.level, m.level_label or f'레벨 {m.level}')} (레벨 {m.level})\n"
             f"조정 후: {target}\n"
             f"마지막 접속일: {last}\n"
             f"가입일: {join}\n"

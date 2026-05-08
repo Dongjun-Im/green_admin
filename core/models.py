@@ -13,7 +13,7 @@ class Member:
     user_id: str
     name: str = ""           # 본명 (소리샘 컬럼: 이름)
     nickname: str = ""       # 닉네임 (소리샘 컬럼: 닉네임)
-    level: int = 0           # 사이트 실제: 5 일반 / 6 우수 / 7 최우수 / 8 명예 / 9 관리자
+    level: int = 0           # 사이트 실제: 5 준회원 / 6 일반 / 7 우수 / 8 최우수 / 9 명예
     level_label: str = ""
     last_login_date: Optional[date] = None
     join_date: Optional[date] = None
@@ -21,6 +21,10 @@ class Member:
     post_count: Optional[int] = None   # 게시물 수 (현재 미사용, 추후 추가)
     mb_no: Optional[str] = None
     raw_row_html: str = ""
+    # v1.0.2: 동호회관리자 플래그 — cl_level 과 별개로 사이트에 표시되는
+    # admin/관리자 체크박스·표기로부터 추출. True 일 때 cl_level 이 어떤 값이든
+    # 화면에는 "동호회관리자" 로 표시되어 일반 회원과 즉시 구분된다.
+    is_admin: bool = False
 
     def display(self) -> str:
         last = self.last_login_date.isoformat() if self.last_login_date else "알 수 없음"
@@ -41,16 +45,21 @@ class AdjustmentItem:
     def display(self) -> str:
         from config import LEVEL_LABELS
         nick = self.member.nickname or self.member.name or self.member.user_id
+        # v1.0.2: 등급 라벨은 LEVEL_LABELS(정수 매핑) 우선 — 사이트 셀렉트 옵션 텍스트가
+        # 다르게 보일 수 있으므로 사용자 확정 매핑을 정답으로 사용.
+        cur_label = LEVEL_LABELS.get(
+            self.from_level, self.member.level_label or f"레벨 {self.from_level}"
+        )
         if self.action == "demote":
             target = LEVEL_LABELS.get(self.to_level or 0, f"레벨 {self.to_level}")
             return (
                 f"{self.member.user_id} / {nick} / "
-                f"{self.member.level_label} → {target} / {self.reason}"
+                f"{cur_label} → {target} / {self.reason}"
             )
         if self.action == "delete":
             return (
                 f"{self.member.user_id} / {nick} / "
-                f"{self.member.level_label} → 탈퇴 / {self.reason}"
+                f"{cur_label} → 탈퇴 / {self.reason}"
             )
         return f"{self.member.user_id} / {nick} / 건너뜀 / {self.reason}"
 

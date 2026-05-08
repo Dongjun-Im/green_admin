@@ -29,6 +29,15 @@ class MemberCrawler:
     def fetch_all_members(
         self, progress_cb: Optional[ProgressCB] = None
     ) -> list[Member]:
+        """모든 페이지를 순회해 회원을 수집.
+
+        v1.0 강건화:
+          · `has_next` 검사(페이지 링크 단순 문자열 매치)는 사이트 마크업 변화에
+            취약해 false negative 가 자주 발생. 이를 의존하지 않고 다음 두 조건
+            으로만 종료한다.
+              1) 페이지에 회원이 0명 (실제로 끝)
+              2) 직전 페이지와 동일한 회원 ID 집합 (페이지 끝 반복)
+        """
         all_members: list[Member] = []
         seen_ids: set[str] = set()
         prev_page_ids: set[str] = set()
@@ -40,24 +49,27 @@ class MemberCrawler:
                 except Exception:
                     pass
 
-            members, has_next = self.fetch_page(page)
+            members, _has_next = self.fetch_page(page)
 
             if not members:
                 break
 
             current_ids = {m.user_id for m in members}
-            # 같은 페이지가 반복되면 종료 (페이지네이션 무한루프 방지)
-            if current_ids == prev_page_ids:
+            # 같은 페이지가 반복되면 종료 (마지막 페이지를 사이트가 반복 반환)
+            if current_ids and current_ids == prev_page_ids:
                 break
             prev_page_ids = current_ids
 
+            new_in_page = 0
             for m in members:
                 if m.user_id in seen_ids:
                     continue
                 seen_ids.add(m.user_id)
                 all_members.append(m)
+                new_in_page += 1
 
-            if not has_next:
+            # 새 회원이 0명이면 페이지 반복으로 간주 (이중 안전망)
+            if new_in_page == 0:
                 break
 
         if not all_members:
