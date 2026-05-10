@@ -229,10 +229,10 @@ class ManualMailDialog(wx.Dialog):
                 body,
             ))
 
-        # 5) 등급별 전체 발송 (v1.0+ 사이트 매핑 = LEVEL_LABELS 일치 확인)
-        # 5,6,7,8,9 5개 등급을 항상 라디오에 표시 (0명도 포함).
+        # 5) 등급별 전체 발송 (사이트 cl_level 매핑과 일치)
+        # 4,5,6,7,8 5개 등급(준회원~명예회원) 을 항상 라디오에 표시 (0명도 포함).
         if self.members:
-            for lv in (5, 6, 7, 8, 9):
+            for lv in (4, 5, 6, 7, 8):
                 ids = [m.user_id for m in self.members if m.level == lv]
                 label = LEVEL_LABELS.get(lv, f"레벨 {lv}")
                 items.append((
@@ -241,8 +241,8 @@ class ManualMailDialog(wx.Dialog):
                     f"[초록등대] {label} 안내",
                     "",
                 ))
-            # 통합 — 가입 완료된 전체 회원 (5~9)
-            ids_all = [m.user_id for m in self.members if 5 <= m.level <= 9]
+            # 통합 — 가입 완료된 전체 회원 (4~8)
+            ids_all = [m.user_id for m in self.members if 4 <= m.level <= 8]
             items.append((
                 f"가입 완료된 전체 회원 ({len(ids_all)}명)",
                 ids_all,

@@ -65,6 +65,9 @@ class Authenticator:
         self.session.headers.update({
             "User-Agent": "GreenAuth/1.0",
         })
+        self.user_id: str = ""
+        self.nickname: str = ""
+        self.rank: str = ""
 
     def authenticate(self, user_id: str, password: str) -> AuthResult:
         """소리샘 로그인 후 초록등대 동호회 회원 등급을 확인한다."""

@@ -1,14 +1,13 @@
-"""MVP TOP N 분석 서비스 (v0.5).
+"""MVP TOP N 분석 서비스 (v0.5 → v1.1 since-date 적용).
 
 분기마다 한 번씩 우리들의 이야기(green3) + 질문게시판(green9) 의
 글·댓글을 종합해 활동점수가 가장 높은 회원 N명을 뽑는다.
 
-- 산정 가중치: 활동점수 = 글수 + 댓글수 × COMMENT_WEIGHT (config.COMMENT_WEIGHT)
-- 명예회원(9) 은 이미 최고 등급이므로 제외 (config.MVP_EXCLUDED_LEVELS)
+- 산정 가중치: 활동점수 = 글수 + 댓글수 × COMMENT_WEIGHT
+- 명예회원(9) 은 이미 최고 등급이므로 제외 (MVP_EXCLUDED_LEVELS)
 - 동호회관리자는 페이지 권한으로 판정 — admin_user_id 만 명시 제외
+- since=MVP_SINCE_DATE (config) 이후(포함) 작성된 글·댓글만 카운트
 - 출력: 정렬된 list[MvpItem]
-
-사이트 호출이 많아(회원 × 게시판 수 × 2) 전체 일반회원 이상에 대해서만 실행한다.
 """
 from __future__ import annotations
 
@@ -23,6 +22,7 @@ from config import (
     COMMENT_WEIGHT,
     LEVEL_LABELS,
     MVP_EXCLUDED_LEVELS,
+    MVP_SINCE_DATE,
     MVP_TOP_N,
 )
 from core.activity_counter import ActivityCounter, MemberActivity
@@ -66,14 +66,18 @@ class MvpReport:
     total_scanned: int = 0
     total_counted: int = 0
     boards: tuple[str, ...] = ACTIVITY_BOARDS
+    since: Optional[date] = None  # 산정 시작일 (None 이면 전체)
 
     def speak_summary(self) -> str:
         if not self.items:
             return f"{self.quarter} MVP: 산정 가능한 회원이 없습니다."
         top = self.items[0]
         nick = top.member.nickname or top.member.user_id
+        since_part = (
+            f"({self.since.isoformat()} 이후) " if self.since else ""
+        )
         return (
-            f"{self.quarter} MVP TOP {len(self.items)}. "
+            f"{self.quarter} MVP TOP {len(self.items)} {since_part}. "
             f"1위 {nick}, 활동점수 {top.score:.1f}점."
         )
 
@@ -98,12 +102,14 @@ class MvpService:
         boards: tuple[str, ...] = ACTIVITY_BOARDS,
         top_n: int = MVP_TOP_N,
         excluded_levels: tuple[int, ...] = MVP_EXCLUDED_LEVELS,
+        since: Optional[date] = MVP_SINCE_DATE,
     ) -> None:
         self.crawler = crawler
         self.admin_user_id = (admin_user_id or "").lower()
         self.boards = boards
         self.top_n = top_n
         self.excluded_levels = set(excluded_levels)
+        self.since = since
         self.activity_counter = ActivityCounter(crawler.session, boards=boards)
 
     def run(
@@ -114,11 +120,11 @@ class MvpService:
         if members is None:
             members = self.crawler.fetch_all_members(progress_cb=progress_cb)
 
-        # 후보: 일반회원(6) ~ 최우수(8). 명예회원과 그 이하 등급은 제외.
-        # v1.0.2: 동호회관리자(is_admin) 도 MVP 산정 대상에서 제외.
+        # 후보: 일반회원(5) ~ 최우수(7). 명예회원과 그 이하 등급은 제외 (excluded_levels).
+        # 동호회관리자(is_admin) 도 MVP 산정 대상에서 제외.
         candidates = [
             m for m in members
-            if m.level >= 6
+            if m.level >= 5
             and m.level not in self.excluded_levels
             and not getattr(m, "is_admin", False)
             and m.user_id.lower() != self.admin_user_id
@@ -133,7 +139,9 @@ class MvpService:
                     progress_cb(idx, total)
                 except Exception:
                     pass
-            ma: MemberActivity = self.activity_counter.fetch_member(m.user_id)
+            ma: MemberActivity = self.activity_counter.fetch_member(
+                m.user_id, since=self.since,
+            )
             total_counted += 1
             if ma.score <= 0:
                 continue
@@ -160,6 +168,7 @@ class MvpService:
             total_scanned=len(members),
             total_counted=total_counted,
             boards=self.boards,
+            since=self.since,
         )
 
 
@@ -176,6 +185,8 @@ def write_mvp_report(report: MvpReport, path: Optional[Path] = None) -> Path:
         f"산정 게시판: {', '.join(report.boards)} "
         f"(가중치: 댓글 = {COMMENT_WEIGHT})"
     )
+    if report.since is not None:
+        lines.append(f"산정 시작일: {report.since.isoformat()} (이후 작성된 글·댓글만)")
     lines.append("=" * 60)
     if not report.items:
         lines.append("(MVP 후보 없음)")

@@ -46,12 +46,13 @@ def test_seen_store_persistence():
 
 
 def test_find_pending_filters_by_level(tmp_seen):
+    """사이트의 가입 단계는 대기(3) 만 — 준회원(4) 이상은 이미 승인된 상태."""
     from core.pending_members import find_pending
     members = [
-        _make_member("a", 3),
-        _make_member("b", 4),
-        _make_member("c", 5),  # 준회원 — 대상 아님
-        _make_member("d", 6),
+        _make_member("a", 3),  # 대기 — 대상
+        _make_member("b", 3),  # 대기 — 대상
+        _make_member("c", 4),  # 준회원 — 이미 승인됨, 대상 아님
+        _make_member("d", 5),  # 일반회원 — 대상 아님
     ]
     result = find_pending(members, seen_store=tmp_seen)
     user_ids = {pm.member.user_id for pm in result}
@@ -60,7 +61,7 @@ def test_find_pending_filters_by_level(tmp_seen):
 
 def test_find_pending_excludes_seen_by_default(tmp_seen):
     from core.pending_members import find_pending
-    members = [_make_member("a", 4), _make_member("b", 4)]
+    members = [_make_member("a", 3), _make_member("b", 3)]
     tmp_seen.mark_seen("a")
     result = find_pending(members, seen_store=tmp_seen, only_unseen=True)
     assert {pm.member.user_id for pm in result} == {"b"}
@@ -68,7 +69,7 @@ def test_find_pending_excludes_seen_by_default(tmp_seen):
 
 def test_find_pending_includes_seen_when_only_unseen_false(tmp_seen):
     from core.pending_members import find_pending
-    members = [_make_member("a", 4), _make_member("b", 4)]
+    members = [_make_member("a", 3), _make_member("b", 3)]
     tmp_seen.mark_seen("a")
     result = find_pending(members, seen_store=tmp_seen, only_unseen=False)
     seen_flags = {pm.member.user_id: pm.seen_before for pm in result}
@@ -78,9 +79,9 @@ def test_find_pending_includes_seen_when_only_unseen_false(tmp_seen):
 def test_find_pending_sorted_recent_join_first(tmp_seen):
     from core.pending_members import find_pending
     members = [
-        _make_member("old", 4, join_date=date(2024, 1, 1)),
-        _make_member("new", 4, join_date=date(2026, 5, 1)),
-        _make_member("mid", 4, join_date=date(2025, 6, 1)),
+        _make_member("old", 3, join_date=date(2024, 1, 1)),
+        _make_member("new", 3, join_date=date(2026, 5, 1)),
+        _make_member("mid", 3, join_date=date(2025, 6, 1)),
     ]
     result = find_pending(members, seen_store=tmp_seen)
     order = [pm.member.user_id for pm in result]

@@ -10,7 +10,7 @@
     # session을 사용하여 소리샘 페이지 접근 가능
 """
 
-from green_auth.auth_app import run_authentication, run_authentication_with_user
+from green_auth.auth_app import run_authentication
 from green_auth.authenticator import Authenticator, AuthResult
 from green_auth.credentials import save_credentials, load_credentials, delete_credentials
 from green_auth.screen_reader import speak
@@ -18,7 +18,6 @@ from green_auth.screen_reader import speak
 __version__ = "1.0.0"
 __all__ = [
     "run_authentication",
-    "run_authentication_with_user",
     "Authenticator",
     "AuthResult",
     "save_credentials",

@@ -18,6 +18,7 @@ from config import (
     DUMPS_DIR,
     LOGS_DIR,
 )
+from core import app_options
 from core.backup_retention import DEFAULT_RETENTION_MONTHS, archive_old_backups
 from core.backup_service import BackupService
 from core.crawler import MemberCrawler
@@ -57,7 +58,10 @@ from ui.item_text_ctrl import ItemTextCtrl
 from ui.log_viewer_dialog import LogViewerDialog
 from ui.mail_dialog import ManualMailDialog
 from ui.mvp_dialog import MvpDialog
+from ui.board_dialog import BoardAdminDialog
+from ui.payment_dialog import PaymentDialog
 from ui.pending_member_dialog import PendingMemberDialog
+from ui.progress_dialog import ProgressTaskDialog
 from ui.promotion_imminent_dialog import PromotionImminentDialog
 from ui.search_dialog import MemberSearchDialog
 from ui.stats_dialog import StatsDialog
@@ -91,6 +95,9 @@ ID_PENDING_RESET_SEEN = wx.NewIdRef()
 ID_LEVEL_HISTORY = wx.NewIdRef()
 ID_SITE_DIAGNOSE = wx.NewIdRef()
 ID_CHECK_UPDATE = wx.NewIdRef()
+ID_PAYMENTS = wx.NewIdRef()
+ID_TOGGLE_AUTO_ADJUST = wx.NewIdRef()
+ID_BOARD_ADMIN = wx.NewIdRef()
 
 
 class MainFrame(wx.Frame):
@@ -171,11 +178,21 @@ class MainFrame(wx.Frame):
             ID_ADJUST_APPLY,
             "장기미접속 조정 — 실제 적용(&A)\tCtrl+Shift+R",
         )
+        # 체크 항목 — 시작 시 도래해 있으면 자동 실행할지 사용자가 선택.
+        self.auto_adjust_item = task_menu.Append(
+            ID_TOGGLE_AUTO_ADJUST,
+            "장기미접속 조정 자동 실행(&O)",
+            "체크 시 앱 시작 직후 도래한 경우 자동으로 미리보기를 실행합니다",
+            kind=wx.ITEM_CHECK,
+        )
+        self.auto_adjust_item.Check(bool(app_options.get("auto_run_adjustment")))
         task_menu.AppendSeparator()
         task_menu.Append(
             ID_MANUAL_MAIL,
             "수동 메일 발송 (rtgreen 전용)(&M)\tCtrl+M",
         )
+        task_menu.Append(ID_PAYMENTS, "자료실 구독비 관리(&P)...\tCtrl+P")
+        task_menu.Append(ID_BOARD_ADMIN, "게시판 관리 / 공지 작성(&W)...")
         task_menu.AppendSeparator()
         task_menu.Append(ID_UNDO_LAST, "마지막 작업 되돌리기(&Z)\tCtrl+Z")
         task_menu.AppendSeparator()
@@ -225,6 +242,9 @@ class MainFrame(wx.Frame):
         self.Bind(wx.EVT_MENU, self.on_level_history, id=ID_LEVEL_HISTORY)
         self.Bind(wx.EVT_MENU, self.on_site_diagnose, id=ID_SITE_DIAGNOSE)
         self.Bind(wx.EVT_MENU, self.on_check_update, id=ID_CHECK_UPDATE)
+        self.Bind(wx.EVT_MENU, self.on_payments, id=ID_PAYMENTS)
+        self.Bind(wx.EVT_MENU, self.on_board_admin, id=ID_BOARD_ADMIN)
+        self.Bind(wx.EVT_MENU, self.on_toggle_auto_adjust, id=ID_TOGGLE_AUTO_ADJUST)
         self.Bind(wx.EVT_MENU, self._on_close, id=wx.ID_EXIT)
 
         # 사용자 정의 단축키 (data/keybindings.json) 적용
@@ -703,29 +723,53 @@ class MainFrame(wx.Frame):
         if self._busy:
             speak("다른 작업이 진행 중입니다.")
             return
-        self._run_in_thread(self._do_build_plan, label="조정 미리보기")
+        self._do_build_plan()
 
     def _do_build_plan(self) -> None:
-        speak("회원 목록을 불러와 조정 대상을 분석합니다.")
-        wx.CallAfter(self.SetStatusText, "조정 미리보기 생성 중...", 0)
-        try:
-            admin = MemberAdminAdapter(self.session, dry_run=True)
-            service = LevelAdjustmentService(
-                self.crawler,
-                admin,
-                admin_user_id=self.admin_user_id,
-                log_writer=self.log_writer,
-            )
-            plan = service.build_plan(progress_cb=self._page_progress_cb)
-        except EmptyParseError as e:
-            wx.CallAfter(self._report_error, str(e))
+        """진행 다이얼로그 + 비프 안내가 포함된 장기미접속 미리보기 생성."""
+        if self._busy:
             return
-        except Exception as e:
-            wx.CallAfter(self._report_error, f"미리보기 실패: {e}")
+        self._busy = True
+        speak("회원 목록을 불러와 조정 대상을 분석합니다.")
+        self.SetStatusText("조정 미리보기 생성 중...", 0)
+
+        admin = MemberAdminAdapter(self.session, dry_run=True)
+        service = LevelAdjustmentService(
+            self.crawler,
+            admin,
+            admin_user_id=self.admin_user_id,
+            log_writer=self.log_writer,
+        )
+
+        def worker(progress_cb):
+            return service.build_plan(
+                progress_cb=lambda c, t: progress_cb(
+                    c, t, f"회원 페이지 수집 {c}/{t}",
+                ),
+            )
+
+        dlg = ProgressTaskDialog(
+            self, title="장기미접속 미리보기",
+            task=worker,
+            message="회원 목록 수집 중...",
+        )
+        try:
+            dlg.run_modal()
+        finally:
+            dlg.Destroy()
+            self._busy = False
+            self.SetStatusText("준비됨", 0)
+
+        if dlg.error is not None:
+            if isinstance(dlg.error, EmptyParseError):
+                self._report_error(str(dlg.error))
+            else:
+                self._report_error(f"미리보기 실패: {dlg.error}")
             return
 
+        plan = dlg.result
         self._last_plan = plan
-        wx.CallAfter(self._show_plan_dialog, plan)
+        self._show_plan_dialog(plan)
 
     def _show_plan_dialog(self, plan: AdjustmentPlan) -> None:
         self.SetStatusText("조정 미리보기 준비됨", 0)
@@ -901,6 +945,22 @@ class MainFrame(wx.Frame):
         speak(msg)
         self.SetStatusText(msg, 0)
 
+    def on_toggle_auto_adjust(self, event=None) -> None:
+        """장기미접속 조정 자동 실행 옵션 토글."""
+        new_val = self.auto_adjust_item.IsChecked()
+        app_options.set_value("auto_run_adjustment", bool(new_val))
+        if new_val:
+            speak(
+                "장기미접속 조정 자동 실행을 켰습니다. "
+                "다음 앱 시작 시 도래해 있으면 자동으로 미리보기가 시작됩니다."
+            )
+        else:
+            speak(
+                "장기미접속 조정 자동 실행을 껐습니다. "
+                "도래 여부는 시작 시 음성 안내만 하고, "
+                "직접 컨트롤 R 또는 작업 메뉴로 시작해 주세요."
+            )
+
     def on_last_info(self, event=None) -> None:
         last_b = self.tracker.last_backup_date()
         last_a = self.tracker.last_adjustment_date()
@@ -987,6 +1047,38 @@ class MainFrame(wx.Frame):
 
     def on_stats(self, event=None) -> None:
         dlg = StatsDialog(self, members=self._cached_members or [])
+        dlg.ShowModal()
+        dlg.Destroy()
+
+    def on_payments(self, event=None) -> None:
+        """자료실 구독비 관리 화면 — 토스 거래내역 import + 회원×월 매트릭스."""
+        members = self._cached_members
+        if not members:
+            speak(
+                "회원 목록이 비어있어 자료실 구독비 화면을 열 수 없습니다. "
+                "Ctrl+F 로 회원 검색을 한 번 실행해 회원을 불러온 뒤 다시 시도해 주세요."
+            )
+            wx.MessageBox(
+                "회원 목록이 비어있어 매핑·매트릭스를 만들 수 없습니다.\n"
+                "먼저 Ctrl+F 로 회원 검색을 한 번 실행해 회원 목록을 불러와 주세요.",
+                "회원 목록 필요",
+                wx.OK | wx.ICON_INFORMATION,
+            )
+            return
+        dlg = PaymentDialog(
+            self,
+            members=members,
+            session=self.session,
+            current_user_id=self.admin_user_id,
+        )
+        dlg.ShowModal()
+        dlg.Destroy()
+
+    def on_board_admin(self, event=None) -> None:
+        """게시판 관리 / 공지 작성 — 소리샘 게시판 설정 폼 + 단일/일괄 공지."""
+        dlg = BoardAdminDialog(
+            self, session=self.session, admin_user_id=self.admin_user_id,
+        )
         dlg.ShowModal()
         dlg.Destroy()
 
@@ -1333,51 +1425,73 @@ class MainFrame(wx.Frame):
         if self._busy:
             speak("다른 작업이 진행 중입니다.")
             return
-        self._run_in_thread(self._do_mvp_analysis, label="MVP 분석")
+        self._do_mvp_analysis()
 
     def _do_mvp_analysis(self) -> None:
+        """진행 다이얼로그 + 비프 안내가 포함된 MVP TOP N 분석.
+
+        2단계: (1) 회원 페이지 수집 → (2) 회원별 활동점수 산정. 두 단계 모두
+        같은 ProgressTaskDialog 게이지에 진행률을 보고하고, 진행에 따라 음높이가
+        상승하는 짧은 비프가 함께 재생된다.
+        """
+        if self._busy:
+            return
+        self._busy = True
         speak(
             "회원 목록을 수집한 뒤 우리들의 이야기와 질문게시판의 "
             "글·댓글을 합산합니다. 일반회원 이상 대상이라 시간이 걸릴 수 있습니다."
         )
-        wx.CallAfter(self.SetStatusText, "MVP 분석 중...", 0)
-        try:
-            members = self.crawler.fetch_all_members(progress_cb=self._page_progress_cb)
-        except EmptyParseError as e:
-            wx.CallAfter(self._report_error, str(e))
-            return
-        except Exception as e:
-            wx.CallAfter(self._report_error, f"수집 실패: {e}")
-            return
-        self._cached_members = members
+        self.SetStatusText("MVP 분석 중...", 0)
 
-        try:
-            service = MvpService(
-                self.crawler,
-                admin_user_id=self.admin_user_id,
+        crawler = self.crawler
+        admin_user_id = self.admin_user_id
+
+        def worker(progress_cb):
+            members = crawler.fetch_all_members(
+                progress_cb=lambda c, t: progress_cb(
+                    c, t, f"회원 페이지 수집 {c}/{t}",
+                ),
             )
+            service = MvpService(crawler, admin_user_id=admin_user_id)
             report = service.run(
                 members=members,
-                progress_cb=self._item_progress_cb,
+                progress_cb=lambda c, t: progress_cb(
+                    c, t, f"활동점수 산정 {c}/{t}",
+                ),
             )
-        except Exception as e:
-            wx.CallAfter(self._report_error, f"MVP 분석 실패: {e}")
+            try:
+                saved = write_mvp_report(report)
+            except Exception:
+                saved = None
+            return (members, report, saved)
+
+        dlg = ProgressTaskDialog(
+            self, title="MVP TOP 분석",
+            task=worker,
+            message="MVP 분석 시작 — 회원 페이지 수집 중...",
+        )
+        try:
+            dlg.run_modal()
+        finally:
+            dlg.Destroy()
+            self._busy = False
+            self.SetStatusText("준비됨", 0)
+
+        if dlg.error is not None:
+            if isinstance(dlg.error, EmptyParseError):
+                self._report_error(str(dlg.error))
+            else:
+                self._report_error(f"MVP 분석 실패: {dlg.error}")
             return
 
-        # 리포트 자동 저장
-        try:
-            saved = write_mvp_report(report)
-        except Exception:
-            saved = None
-
-        # 스케줄 마킹 (성공 케이스만)
+        members, report, saved = dlg.result
+        self._cached_members = members
         if report.items:
             self.tracker.mark_mvp_done(top_n=len(report.items), quarter=report.quarter)
             self.log_writer.write_event(
                 f"mvp quarter={report.quarter} top_n={len(report.items)}"
             )
-
-        wx.CallAfter(self._after_mvp, report, saved)
+        self._after_mvp(report, saved)
 
     def _after_mvp(self, report: MvpReport, saved_path) -> None:
         self.SetStatusText(f"MVP 분석 완료: {report.quarter}", 0)
@@ -1583,6 +1697,8 @@ class MainFrame(wx.Frame):
         backup_due = self.tracker.is_backup_due()
         adjust_due = self.tracker.is_adjustment_due()
         mvp_due = self.tracker.is_mvp_due()
+        # 장기미접속 조정 자동 실행 옵션 — 기본 False (사용자 직접 실행).
+        auto_run_adjust = bool(app_options.get("auto_run_adjustment"))
 
         if not backup_due and not adjust_due and not mvp_due:
             self.on_check_due()
@@ -1593,18 +1709,38 @@ class MainFrame(wx.Frame):
         if backup_due:
             speak("3개월 주기 백업을 자동 시작합니다.")
             self._run_in_thread(self._do_backup_then_maybe_adjust, label="자동 백업")
-        elif adjust_due:
+        elif adjust_due and auto_run_adjust:
             speak("6개월 주기 장기미접속 조정 미리보기를 자동 생성합니다.")
             self.on_adjust_preview()
+        elif adjust_due:
+            # 자동 실행 꺼짐 — 안내만 하고 사용자 트리거 대기.
+            speak(
+                "6개월 주기 장기미접속 조정이 도래해 있습니다. "
+                "자동 실행이 꺼져 있으니 컨트롤 R 또는 작업 메뉴에서 시작해 주세요."
+            )
+            self.SetStatusText(
+                "장기미접속 조정 도래 — Ctrl+R 로 시작 가능", 0,
+            )
+            wx.CallAfter(self.check_pending_on_startup)
         elif mvp_due:
             speak("3개월 주기 MVP 분석을 자동 시작합니다.")
-            self._run_in_thread(self._do_mvp_analysis, label="자동 MVP")
+            wx.CallAfter(self._do_mvp_analysis)
 
     def _do_backup_then_maybe_adjust(self) -> None:
         self._do_backup()
-        # 조정이 도래해 있으면 백업 끝난 뒤 미리보기 자동 트리거
-        if self.tracker.is_adjustment_due():
+        # 조정이 도래해 있고 자동 실행 옵션이 켜져 있으면 백업 끝난 뒤 미리보기 자동 트리거.
+        if (
+            self.tracker.is_adjustment_due()
+            and bool(app_options.get("auto_run_adjustment"))
+        ):
             wx.CallAfter(self._auto_trigger_adjust)
+        elif self.tracker.is_adjustment_due():
+            wx.CallAfter(
+                speak,
+                "백업이 끝났습니다. 장기미접속 조정도 도래해 있으나 "
+                "자동 실행이 꺼져 있어 시작하지 않습니다. "
+                "컨트롤 R 또는 작업 메뉴에서 시작해 주세요.",
+            )
         elif self.tracker.is_mvp_due():
             wx.CallAfter(self._auto_trigger_mvp)
 
@@ -1614,7 +1750,7 @@ class MainFrame(wx.Frame):
 
     def _auto_trigger_mvp(self) -> None:
         speak("이어서 3개월 주기 MVP 분석을 시작합니다.")
-        self._run_in_thread(self._do_mvp_analysis, label="자동 MVP")
+        wx.CallAfter(self._do_mvp_analysis)
 
     def trigger_pending_check_if_due(self) -> None:
         """긴 자동 작업이 끝난 뒤 또는 시작 직후에 신규 가입자 알림."""

@@ -13,29 +13,29 @@ def determine():
 @pytest.mark.parametrize(
     "level,score,expected",
     [
-        # 신청·대기 → 준회원 (활동점수 3)
+        # 대기(3) → 준회원(4) (활동점수 3)
         (3, 0, None),
         (3, 2.9, None),
-        (3, 3, 5),
-        (4, 100, 5),
-        # 준회원 → 일반회원 (v0.5 신규, 활동점수 5)
-        (5, 4.9, None),
-        (5, 5, 6),
-        (5, 50, 6),
-        # 일반회원 → 우수/최우수/명예 (30/60/300, v1.0.1 명예 임계 상향)
-        (6, 29, None),
-        (6, 30, 7),
-        (6, 59.9, 7),
-        (6, 60, 8),
-        (6, 119, 8),
-        (6, 120, 8),
-        (6, 299, 8),
-        (6, 300, 9),
-        (6, 9999, 9),
-        # 7 이상은 변경 없음
+        (3, 3, 4),
+        # 준회원(4) → 일반회원(5) (활동점수 5)
+        (4, 4.9, None),
+        (4, 5, 5),
+        (4, 50, 5),
+        # 일반회원(5) → 우수(6)/최우수(7)/명예(8) (30/60/300)
+        (5, 29, None),
+        (5, 30, 6),
+        (5, 59.9, 6),
+        (5, 60, 7),
+        (5, 119, 7),
+        (5, 120, 7),
+        (5, 299, 7),
+        (5, 300, 8),
+        (5, 9999, 8),
+        # 6 이상은 변경 없음 (최고 활동 등급에서 추가 승급 없음)
+        (6, 10000, None),
         (7, 10000, None),
         (8, 10000, None),
-        (9, 10000, None),
+        (9, 10000, None),  # 동호회관리자
         # 0~2 (손님/탈퇴/거부)는 대상 아님
         (0, 100, None),
         (1, 100, None),
@@ -49,5 +49,5 @@ def test_determine_target_level(determine, level, score, expected):
 def test_determine_with_legacy_int_signature():
     """구버전 호환 — post_count 정수만 받던 시그니처."""
     from core.promotion_service import determine_target_level_by_posts
-    assert determine_target_level_by_posts(6, 30) == 7
-    assert determine_target_level_by_posts(3, 3) == 5
+    assert determine_target_level_by_posts(5, 30) == 6  # 일반회원 → 우수
+    assert determine_target_level_by_posts(3, 3) == 4   # 대기 → 준회원

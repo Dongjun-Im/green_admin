@@ -35,9 +35,20 @@ data/admin_flags.json
 # Sensitive user credentials (if green_auth writes here)
 data/credentials.ini
 
-# IDE
+# 자료실 구독비 관리 — 토스 거래내역(실명·계좌 포함) 및 결제 SQLite
+data/samples/
+data/payments.db
+# Google Sheets OAuth 토큰
+data/google_token.json
+data/google_credentials.json
+data/sheets_config.json
+# DSM(Synology) 관리자 자격증명 (암호화 저장)
+data/dsm_credentials.ini
+
+# IDE / 도구 로컬 설정
 .vscode/
 .idea/
+.claude/
 *.swp
 
 # OS

@@ -23,10 +23,11 @@ from green_auth import run_authentication  # noqa: E402
 
 def main() -> int:
     app = wx.App(False)
-    session = run_authentication("관리자 페이지 덤프 도구")
-    if session is None:
+    auth = run_authentication("관리자 페이지 덤프 도구")
+    if auth is None:
         print("로그인 실패 또는 취소")
         return 1
+    session = auth.session
 
     os.makedirs(DUMPS_DIR, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")

@@ -14,7 +14,7 @@
 
 ## 진입점·흐름
 `main.py` → wx.App → green_auth 로그인 → `core/permission.admin_permission_check`
-(동호회관리자 등급 9만 허용) → `ui/main_frame.MainFrame` → `run_scheduled_tasks_if_due`
+(관리자 페이지 접근권 — `cl_level` 셀렉트 노출 여부로 판정) → `ui/main_frame.MainFrame` → `run_scheduled_tasks_if_due`
 
 ## 모듈 구조
 - `core/`: 크롤러, 파서, 서비스
@@ -67,10 +67,12 @@
 - `backups/archives/` (v0.4) — 오래된 백업 zip 보관소
 - `backups/mvp_top10_YYYY-Q.txt` (v0.5) — 분기 MVP 리포트
 
-## 등급 체계 (소리샘 admin.member.php 실제 값, v0.4 새 매핑)
-0 손님 / 1 탈퇴 / 2 거부 / 3 대기 / 4 신청 / 5 준회원 / 6 일반회원 / 7 우수회원 / 8 최우수회원 / 9 명예회원
+## 등급 체계 (소리샘 admin.member.php cl_level select 실제 값)
+0 손님 / 1 탈퇴 / 2 거부 / 3 대기 / 4 준회원 / 5 일반회원 / 6 우수회원 / 7 최우수회원 / 8 명예회원 / 9 동호회관리자
+(권위 있는 매핑은 [config.py](config.py) `LEVEL_LABELS` / `LEVEL_TEXT_MAP` — 사이트 폼 옵션을 그대로 따른다.)
 
-동호회관리자 권한은 별도 레벨 없이 사이트 페이지 접근권으로 판정 (core/permission.py).
+동호회관리자 = 사이트 `cl_level=9`. 권한 체크 자체는 등급 번호가 아니라
+admin.member.php 페이지 접근 가능 여부로 판정 (core/permission.py).
 
 ## Git 워크플로우
 원격: https://github.com/Dongjun-Im/green_admin.git (private)

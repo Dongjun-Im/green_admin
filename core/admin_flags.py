@@ -24,7 +24,7 @@ ADMIN_FLAGS_FILE = Path(DATA_DIR) / "admin_flags.json"
 class AdminFlagsStore:
     def __init__(self, path: Path = ADMIN_FLAGS_FILE) -> None:
         self.path = Path(path)
-        self._cache: dict[str, str] = {}
+        self._cache: dict[str, dict] = {}
         self._load()
 
     def _load(self) -> None:
@@ -34,10 +34,22 @@ class AdminFlagsStore:
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
             if isinstance(data, dict):
-                # 값이 문자열(timestamp) 이 아니면 빈 문자열로 정규화
-                self._cache = {
-                    str(k): (v if isinstance(v, str) else "") for k, v in data.items()
-                }
+                # 두 가지 형식 모두 지원:
+                #   구버전: {"uid": "2025-01-01T..."}   (str = ts)
+                #   신버전: {"uid": {"ts": "...", "prev_level": 6}}
+                normalized: dict[str, dict] = {}
+                for k, v in data.items():
+                    key = str(k)
+                    if isinstance(v, dict):
+                        normalized[key] = {
+                            "ts": str(v.get("ts", "")),
+                            "prev_level": v.get("prev_level"),
+                        }
+                    elif isinstance(v, str):
+                        normalized[key] = {"ts": v, "prev_level": None}
+                    else:
+                        normalized[key] = {"ts": "", "prev_level": None}
+                self._cache = normalized
             else:
                 self._cache = {}
         except (OSError, json.JSONDecodeError):
@@ -60,8 +72,19 @@ class AdminFlagsStore:
     def is_admin(self, user_id: str) -> bool:
         return user_id in self._cache
 
-    def mark(self, user_id: str) -> None:
-        self._cache[user_id] = datetime.now().isoformat(timespec="seconds")
+    def get_prev_level(self, user_id: str) -> int | None:
+        """동호회관리자로 표시하기 직전의 등급. 해제 시 사이트 등급 복원에 사용."""
+        entry = self._cache.get(user_id)
+        if not entry:
+            return None
+        prev = entry.get("prev_level")
+        return prev if isinstance(prev, int) else None
+
+    def mark(self, user_id: str, prev_level: int | None = None) -> None:
+        self._cache[user_id] = {
+            "ts": datetime.now().isoformat(timespec="seconds"),
+            "prev_level": prev_level,
+        }
         self._save()
 
     def unmark(self, user_id: str) -> None:
@@ -75,7 +98,7 @@ class AdminFlagsStore:
         for uid in user_ids:
             if uid not in self._cache:
                 added += 1
-            self._cache[uid] = ts
+            self._cache[uid] = {"ts": ts, "prev_level": None}
         if added or any(True for _ in user_ids):
             self._save()
         return added

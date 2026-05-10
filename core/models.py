@@ -31,6 +31,24 @@ class Member:
         return f"{self.user_id} / {self.nickname} / {self.level_label} / 마지막접속 {last}"
 
 
+@dataclass(frozen=True)
+class FormApplicant:
+    """자료실 신청 구글 폼('설문지 응답 시트1') 한 행.
+
+    매칭 키는 member_user_id(폼의 '희망아이디' 열) — 소리샘/DSM user_id 와 같다고 본다.
+    applied_at 은 구글 폼 타임스탬프 원본 문자열(형식이 환경마다 달라 그대로 보관).
+    plan_months 는 요금제 문자열에서 파싱한 개월 수 (0 = 못 파싱).
+    """
+    member_user_id: str
+    applied_at: str = ""
+    name: str = ""
+    phone: str = ""
+    email: str = ""
+    plan_raw: str = ""
+    plan_months: int = 0
+    agreed: bool = False
+
+
 Action = Literal["demote", "delete", "skip"]
 
 

@@ -25,9 +25,9 @@ from ui.level_change_dialog import LevelChangeDialog
 from ui.member_note_dialog import MemberNoteDialog
 
 
-# 등급 필터 — 사용자 확정 매핑 (5=준,6=일반,7=우수,8=최우수,9=명예).
-# 0~4 (손님/탈퇴/거부/대기/신청) 과 10+ (관리자) 는 "기타" 로 통합.
-FILTER_LEVELS: tuple[int, ...] = (5, 6, 7, 8, 9)
+# 등급 필터 — 사이트 cl_level 매핑 (4=준,5=일반,6=우수,7=최우수,8=명예).
+# 0~3 (손님/탈퇴/거부/대기) 과 9 (동호회관리자) 는 "기타" 로 통합.
+FILTER_LEVELS: tuple[int, ...] = (4, 5, 6, 7, 8)
 
 
 class MemberSearchDialog(wx.Dialog):
@@ -503,9 +503,20 @@ class MemberSearchDialog(wx.Dialog):
         """체크된 회원의 동호회관리자 표시를 토글한다.
 
         혼합(일부 admin, 일부 아님) 일 때는 모두 admin 으로 표시 (마킹 우선).
-        결과는 data/admin_flags.json 에 영구 저장되어 다음 회원 목록 새로고침에도
-        유지된다. 사이트 권한과는 무관 — 이 앱 안에서의 분류 표시일 뿐.
+        사이트(소리샘) 에 cl_level=10 으로 등급 변경을 POST 하고, 성공 시에만
+        admin_flags.json 과 메모리 상태를 갱신한다. 해제 시에는 표시 직전 등급으로
+        복원한다 (admin_flags 에 prev_level 로 저장된 값 사용, 없으면 6=일반회원).
         """
+        if self.session is None:
+            speak("로그인 세션이 없어 동호회관리자 표시를 변경할 수 없습니다.")
+            wx.MessageBox(
+                "로그인 세션이 없어 사이트에 반영할 수 없습니다.\n"
+                "한 번 로그아웃 후 다시 로그인하면 해결됩니다.",
+                "세션 없음",
+                wx.OK | wx.ICON_WARNING,
+            )
+            return
+
         members = self._checked_members()
         if not members:
             speak("체크된 회원이 없습니다. 스페이스로 체크해 주세요.")
@@ -517,27 +528,76 @@ class MemberSearchDialog(wx.Dialog):
             )
             return
 
-        # 혼합이면 "전부 표시" 를 우선 선택지로
+        # 본인 계정 보호: 자기 자신을 잘못 강등시켜 권한을 잃지 않도록.
+        if any(m.user_id.lower() == self.admin_user_id for m in members):
+            speak("본인 계정은 안전을 위해 이 화면에서 동호회관리자 표시를 변경할 수 없습니다.")
+            wx.MessageBox(
+                "본인 계정의 동호회관리자 표시는 이 화면에서 변경할 수 없습니다.\n"
+                "관리자 권한 상실을 막기 위한 안전 장치입니다.",
+                "변경 불가",
+                wx.OK | wx.ICON_INFORMATION,
+            )
+            return
+
         all_admin = all(m.is_admin for m in members)
+        admin_adapter = MemberAdminAdapter(self.session, dry_run=False)
+        ADMIN_LEVEL = 9   # 사이트 cl_level select 의 동호회관리자 옵션 값
+        DEFAULT_RESTORE_LEVEL = 5  # 일반회원 — prev_level 정보가 없을 때
+
         if all_admin:
+            # 해제: 각자 직전 등급으로 복원
+            level_map: dict[str, int] = {}
+            restore_levels: dict[str, int] = {}
+            for m in members:
+                prev = self.admin_flags.get_prev_level(m.user_id)
+                target = prev if prev is not None else DEFAULT_RESTORE_LEVEL
+                level_map[m.user_id] = target
+                restore_levels[m.user_id] = target
             action = "해제"
-            for m in members:
-                m.is_admin = False
-                self.admin_flags.unmark(m.user_id)
-            speak(f"{len(members)}명 동호회관리자 표시 해제")
+            action_label = f"동호회관리자 해제 → 직전 등급 복원 ({len(members)}명)"
         else:
+            # 표시: 모두 레벨 10 으로
+            level_map = {m.user_id: ADMIN_LEVEL for m in members}
+            restore_levels = {}
             action = "표시"
+            action_label = f"동호회관리자 표시 → 레벨 10 ({len(members)}명)"
+
+        result = admin_adapter.bulk_apply(level_map, action_label=action_label)
+        if not result.success:
+            speak("사이트에 반영하지 못했습니다.")
+            self._modal_msg(
+                f"사이트 반영 실패: {result.message}\n"
+                f"응답 일부: {result.response_snippet[:200] if result.response_snippet else '(없음)'}\n"
+                "로컬 표시는 변경되지 않았습니다.",
+                "오류",
+                wx.ICON_ERROR,
+            )
+            return
+
+        # 사이트 POST 성공 — 로컬 상태 갱신
+        if all_admin:
             for m in members:
+                target = restore_levels[m.user_id]
+                m.is_admin = False
+                m.level = target
+                m.level_label = LEVEL_LABELS.get(target, str(target))
+                self.admin_flags.unmark(m.user_id)
+            speak(f"{len(members)}명 동호회관리자 표시 해제, 직전 등급으로 복원")
+        else:
+            for m in members:
+                # 표시 직전 등급을 admin_flags 에 저장 — 해제 시 이 값으로 복원.
+                self.admin_flags.mark(m.user_id, prev_level=m.level)
                 m.is_admin = True
-                self.admin_flags.mark(m.user_id)
-            speak(f"{len(members)}명 동호회관리자 표시")
+                m.level = ADMIN_LEVEL
+                m.level_label = LEVEL_LABELS.get(ADMIN_LEVEL, str(ADMIN_LEVEL))
+            speak(f"{len(members)}명 동호회관리자 표시, 사이트 레벨 10 반영")
 
         # 화면/필터 갱신 — 표시가 바뀌면 그룹 이동도 즉시 반영
         self._refresh_filter_counts()
         self._apply_filters()
 
         wx.MessageBox(
-            f"{len(members)}명을 동호회관리자로 {action}했습니다.\n"
+            f"{len(members)}명을 동호회관리자로 {action}하고 사이트에 반영했습니다.\n"
             f"data/admin_flags.json 에 저장되어 다음 새로고침에도 유지됩니다.",
             "동호회관리자 표시 토글",
             wx.OK | wx.ICON_INFORMATION,

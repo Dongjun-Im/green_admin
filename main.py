@@ -13,7 +13,7 @@ import sys
 import wx
 
 from config import APP_NAME
-from green_auth import run_authentication_with_user
+from green_auth import run_authentication
 from screen_reader import speak
 
 
@@ -24,10 +24,11 @@ class ChorokGreenAdminApp(wx.App):
         self._play_sound("startup.wav")
 
         # 1) 인증
-        result = run_authentication_with_user(APP_NAME)
-        if result is None:
+        auth = run_authentication(APP_NAME)
+        if auth is None:
             return False
-        self.session, self.user_id = result
+        self.session = auth.session
+        self.user_id = auth.user_id
 
         # 2) 권한 체크 - 동호회관리자만
         from core.permission import admin_permission_check
