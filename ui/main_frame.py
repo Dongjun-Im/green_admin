@@ -56,6 +56,7 @@ from ui.confirm_promotion_dialog import ConfirmPromotionDialog
 from ui.level_history_dialog import LevelHistoryDialog
 from ui.help_dialog import HelpDialog, show_about
 from ui.item_text_ctrl import ItemTextCtrl
+from ui.manual_dialog import ManualDialog
 from ui.log_viewer_dialog import LogViewerDialog
 from ui.mail_dialog import ManualMailDialog
 from ui.mvp_dialog import MvpDialog
@@ -82,6 +83,7 @@ ID_OPEN_LOG = wx.NewIdRef()
 ID_LOGOUT = wx.NewIdRef()
 ID_DUMP = wx.NewIdRef()
 ID_HELP_KEYS = wx.NewIdRef()
+ID_MANUAL = wx.NewIdRef()
 ID_STATS = wx.NewIdRef()
 ID_BACKUP_DIFF = wx.NewIdRef()
 ID_LOG_VIEWER = wx.NewIdRef()
@@ -209,8 +211,10 @@ class MainFrame(wx.Frame):
         bar.Append(dev_menu, "개발자(&D)")
 
         help_menu = wx.Menu()
-        help_menu.Append(wx.ID_ABOUT, "프로그램 정보(&A)\tF1")
+        help_menu.Append(ID_MANUAL, "사용 설명서(&M)\tShift+F1")
         help_menu.Append(ID_HELP_KEYS, "단축키 안내(&K)\tCtrl+K")
+        help_menu.Append(wx.ID_ABOUT, "프로그램 정보(&A)\tF1")
+        help_menu.AppendSeparator()
         help_menu.Append(ID_KEYBINDINGS_OPEN, "단축키 설정 파일(&B)...")
         help_menu.Append(ID_CHECK_UPDATE, "업데이트 확인(&U)")
         bar.Append(help_menu, "도움말(&H)")
@@ -231,6 +235,7 @@ class MainFrame(wx.Frame):
         self.Bind(wx.EVT_MENU, self.on_dump, id=ID_DUMP)
         self.Bind(wx.EVT_MENU, self.on_about, id=wx.ID_ABOUT)
         self.Bind(wx.EVT_MENU, self.on_help_keys, id=ID_HELP_KEYS)
+        self.Bind(wx.EVT_MENU, self.on_manual, id=ID_MANUAL)
         self.Bind(wx.EVT_MENU, self.on_stats, id=ID_STATS)
         self.Bind(wx.EVT_MENU, self.on_backup_diff, id=ID_BACKUP_DIFF)
         self.Bind(wx.EVT_MENU, self.on_log_viewer, id=ID_LOG_VIEWER)
@@ -1049,6 +1054,11 @@ class MainFrame(wx.Frame):
         dlg.ShowModal()
         dlg.Destroy()
 
+    def on_manual(self, event=None) -> None:
+        dlg = ManualDialog(self)
+        dlg.ShowModal()
+        dlg.Destroy()
+
     # ---------- v0.4 신규: 통계 / 백업 비교 / 로그 뷰어 ----------
 
     def on_stats(self, event=None) -> None:
@@ -1625,6 +1635,7 @@ class MainFrame(wx.Frame):
             "backup_diff":    int(ID_BACKUP_DIFF),
             "undo_last":      int(ID_UNDO_LAST),
             "help_keys":      int(ID_HELP_KEYS),
+            "manual":         int(ID_MANUAL),
             "promotion_imminent": int(ID_PROMOTION_IMMINENT),
             "html_report":    int(ID_HTML_REPORT),
         }

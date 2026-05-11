@@ -195,6 +195,14 @@ def normalize_spreadsheet_id(value: str) -> str:
     return s
 
 
+def sheet_url(spreadsheet_id: str) -> str:
+    """시트 ID(또는 URL)로부터 표준 구글 스프레드시트 주소를 만든다. 비면 빈 문자열."""
+    sid = normalize_spreadsheet_id(spreadsheet_id or "")
+    if not sid:
+        return ""
+    return f"https://docs.google.com/spreadsheets/d/{sid}/edit"
+
+
 # ---------- 요금제 문자열 → 개월 수 ----------
 
 def parse_plan_months(text: str) -> int:

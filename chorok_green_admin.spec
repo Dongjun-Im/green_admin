@@ -102,6 +102,7 @@ a = Analysis(
         'ui.item_text_ctrl',
         'ui.confirm_dialog',
         'ui.help_dialog',
+        'ui.manual_dialog',
         'ui.search_dialog',
         'ui.mail_dialog',
         # ui 패키지 (v0.4 신규)
