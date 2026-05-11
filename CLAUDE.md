@@ -24,6 +24,9 @@
   - `activity_counter.py` (v0.5): 글+댓글 통합 카운터 (여러 게시판 지원)
   - `mvp_service.py` (v0.5): 분기 MVP TOP N 산정
   - `pending_members.py` (v0.5): 가입 신청·대기 회원 식별
+  - `withdrawn_blocklist.py` (v1.0.x): 장기미접속으로 '탈퇴'(WITHDRAW_LEVEL)
+    처리된 회원 아이디 명단. 재가입(대기 등급) 으로 다시 나타나면 승인 화면에서
+    '승인' 버튼이 막힌다. `data/inactivity_withdrawn.json` 에 보관.
   - `level_history.py` (v1.0): 영구 등급 변경 이력 SQLite
   - `site_diagnostics.py` (v1.0): 사이트 구조 변경 감지·진단
   - `update_check.py` (v1.0): GitHub Releases 자동 업데이트 확인
@@ -60,6 +63,7 @@
 - `data/member_notes.db` (v0.4) — 회원 메모/태그 SQLite
 - `data/keybindings.json` (v0.4) — 사용자 정의 단축키
 - `data/pending_seen.json` (v0.5) — 신규 가입자 "본 적 있음" 기록
+- `data/inactivity_withdrawn.json` (v1.0.x) — 장기미접속 '탈퇴' 처리자 명단 (재가입 차단)
 - `data/level_history.db` (v1.0) — 영구 등급 변경 이력 SQLite
 - `data/last_update_check.json` (v1.0) — GitHub 업데이트 확인 캐시
 - `data/dumps/`, `data/logs/`

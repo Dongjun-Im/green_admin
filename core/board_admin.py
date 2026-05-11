@@ -35,6 +35,153 @@ from config import (
 )
 
 
+# 게시물 관리(복사/이동/삭제) 요청에는 브라우저처럼 보이는 헤더를 보낸다.
+# 일부 사이트(특히 권한 점검을 강화한 후의 소리샘) 는 Mozilla 류가 아닌
+# User-Agent 의 요청을 다르게 처리해서 대상 게시판 목록을 빈 채로 내려보내는 사례가
+# 있다. 폼·검증 GET 도 동일한 헤더로 통일해 서버 응답 일관성을 확보.
+_BROWSER_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
+)
+_BROWSER_BASE_HEADERS = {
+    "User-Agent": _BROWSER_UA,
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "ko-KR,ko;q=0.9,en;q=0.8",
+    "Upgrade-Insecure-Requests": "1",
+    # 모던 크롬은 same-origin 폼 POST 에도 Sec-Fetch-* 를 함께 보낸다.
+    # 일부 서버/WAF 가 이걸 보고 "스크립트가 아닌 폼 네비게이션" 으로 인식하는데,
+    # 빠지면 다른 응답을 주는 사례가 있어 같이 보낸다.
+    "Sec-Fetch-Site": "same-origin",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-User": "?1",
+}
+
+
+def _browser_headers(referer: str = "", *, post: bool = False,
+                     impersonated: bool = False) -> dict:
+    """게시판 관리 호출용 헤더.
+
+    impersonated=False (일반 requests): UA·Accept·Sec-Fetch-* 까지 직접 세팅.
+    impersonated=True  (curl_cffi 가 진짜 크롬으로 위장 중): UA/Accept 등은 curl_cffi 가
+        제공하므로 건드리지 않고, 요청별로 달라지는 Referer·Origin·Content-Type 과
+        same-origin 폼 네비게이션을 알리는 Sec-Fetch-* 만 명시.
+    """
+    if impersonated:
+        h: dict = {
+            "Sec-Fetch-Site": "same-origin",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-User": "?1",
+        }
+        if referer:
+            h["Referer"] = referer
+        if post:
+            h["Origin"] = SORISEM_BASE_URL.rstrip("/")
+            h["Content-Type"] = "application/x-www-form-urlencoded"
+        return h
+    h = dict(_BROWSER_BASE_HEADERS)
+    if referer:
+        h["Referer"] = referer
+    if post:
+        # Origin 은 same-origin POST 일 때 브라우저가 자동으로 붙임.
+        h["Origin"] = SORISEM_BASE_URL.rstrip("/")
+        h["Content-Type"] = "application/x-www-form-urlencoded"
+    return h
+
+
+# curl_cffi 가 설치돼 있으면 게시물 복사/이동/삭제 요청을 "진짜 크롬"의 TLS·HTTP/2
+# 지문으로 위장해 보낸다. 사이트 앞단 WAF 가 Python 클라이언트를 식별해 다른 응답을
+# 주는 경우(대상 게시판 목록 빈 채로 등) 를 우회하기 위함.
+try:  # pragma: no cover - 환경 의존
+    from curl_cffi import requests as _cffi_requests  # type: ignore
+except Exception:  # pragma: no cover
+    _cffi_requests = None
+
+_IMPERSONATE_PROFILE = "chrome"  # curl_cffi 가 지원하는 최신 크롬 프로파일
+
+
+class _HttpClient:
+    """게시판 관리용 HTTP 클라이언트.
+
+    curl_cffi 가 있으면 크롬 TLS/HTTP 지문으로 위장한 세션(impersonated=True)을,
+    없으면 넘어온 일반 requests.Session 을 그대로 쓴다. 위장 세션엔 현재 로그인
+    세션의 쿠키를 복사해 넣고, 처리가 끝나면 merge_back() 으로 새로 받은 쿠키
+    (새 PHPSESSID 등)를 원래 세션에 되돌려 복사한다.
+    """
+
+    def __init__(self, base_session) -> None:
+        self._base = base_session
+        self._cffi = None
+        if _cffi_requests is not None:
+            for prof in (_IMPERSONATE_PROFILE, "chrome131", "chrome124", "chrome120"):
+                try:
+                    self._cffi = _cffi_requests.Session(impersonate=prof)
+                    break
+                except Exception:
+                    self._cffi = None
+        if self._cffi is not None:
+            try:
+                for c in base_session.cookies:
+                    try:
+                        self._cffi.cookies.set(
+                            c.name, c.value,
+                            domain=c.domain or "www.sorisem.net",
+                            path=c.path or "/",
+                        )
+                    except Exception:
+                        pass
+            except Exception:
+                # 쿠키 복사 자체가 실패하면 위장 세션을 쓰지 않는다
+                try:
+                    self._cffi.close()
+                except Exception:
+                    pass
+                self._cffi = None
+        self.impersonated = self._cffi is not None
+        self._client = self._cffi if self._cffi is not None else base_session
+
+    def headers(self, referer: str = "", *, post: bool = False) -> dict:
+        return _browser_headers(referer=referer, post=post, impersonated=self.impersonated)
+
+    def get(self, url, **kw):
+        return self._client.get(url, **kw)
+
+    def post(self, url, **kw):
+        return self._client.post(url, **kw)
+
+    def merge_back(self) -> None:
+        cffi = self._cffi
+        self._cffi = None  # 멱등 — 두 번 불려도 안전
+        if cffi is None:
+            return
+        try:
+            for c in cffi.cookies.jar:
+                try:
+                    self._base.cookies.set(
+                        c.name, c.value,
+                        domain=c.domain or "www.sorisem.net",
+                        path=c.path or "/",
+                    )
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        try:
+            cffi.close()
+        except Exception:
+            pass
+
+
+def _dump_dir() -> str:
+    """덤프 저장 디렉토리 — config 의 DUMPS_DIR 우선, 없으면 data/dumps."""
+    try:
+        from config import DUMPS_DIR
+        return DUMPS_DIR
+    except Exception:
+        return "data/dumps"
+
+
 # 게시판 관리(설정) 폼 URL 베이스 — bo_table 만 바꿔 끼운다.
 BOARD_FORM_BASE = f"{SORISEM_BASE_URL.rstrip('/')}/skin/board/ar.common/adm.board_form.php"
 # 표준 그누보드 글쓰기 페이지/처리 URL
@@ -658,7 +805,10 @@ def fetch_post_list(session: requests.Session, bo_table: str, page: int = 1) -> 
     pg = max(1, int(page or 1))
     url = board_list_url(bo, pg)
     try:
-        resp = session.get(url, timeout=HTTP_TIMEOUT, headers={"User-Agent": USER_AGENT})
+        resp = session.get(
+            url, timeout=HTTP_TIMEOUT,
+            headers=_browser_headers(referer=f"{SORISEM_BASE_URL.rstrip('/')}/"),
+        )
     except requests.exceptions.RequestException as e:
         raise BoardAdminError(f"네트워크 오류: {e}") from e
     if not resp.ok:
@@ -777,7 +927,10 @@ def fetch_board_list_html(session: requests.Session, bo_table: str, page: int = 
         raise BoardAdminError("게시판 아이디(bo_table)가 비어 있습니다.")
     url = board_list_url(bo, max(1, int(page or 1)))
     try:
-        resp = session.get(url, timeout=HTTP_TIMEOUT, headers={"User-Agent": USER_AGENT})
+        resp = session.get(
+            url, timeout=HTTP_TIMEOUT,
+            headers=_browser_headers(referer=f"{SORISEM_BASE_URL.rstrip('/')}/"),
+        )
     except requests.exceptions.RequestException as e:
         raise BoardAdminError(f"네트워크 오류: {e}") from e
     return resp.text or ""
@@ -790,6 +943,37 @@ def _looks_failed(body: str) -> str:
         if m in body:
             return m
     return ""
+
+
+def _is_real_error_page(body: str) -> str:
+    """'명백한' 에러 페이지인지 판정 — 정상 페이지에 박힌 JS alert 문자열이나
+    팝업 캡션("게시판을 한개 이상 선택해 주십시오") 같은 오탐을 피한다.
+
+    에러 표식: <div id="validation_check"> (그누보드 에러 페이지의 noscript 폴백) /
+    <title>오류안내 페이지</title> / 로그인 페이지 리다이렉트.
+    반환: 사람이 읽을 수 있는 사유 문자열, 또는 "" (에러 아님).
+    """
+    b = body or ""
+    if 'id="validation_check"' in b:
+        m = re.search(r'id="validation_check".*?<(?:p|h1)[^>]*>(.*?)</(?:p|h1)>',
+                      b, re.S | re.I)
+        if m:
+            msg = re.sub(r"<[^>]+>", " ", m.group(1))
+            msg = " ".join(msg.split())
+            return msg[:140] if msg else "검증 오류"
+        return "검증 오류"
+    if "<title>오류안내" in b:
+        return "오류안내 페이지"
+    head = b[:6000]
+    if re.search(r"/bbs/login\.php", head) and 'name="mb_password"' in head:
+        return "로그인 페이지로 리다이렉트됨 — 세션 만료 가능"
+    return ""
+
+
+def _looks_like_move_popup(body: str) -> bool:
+    """move.php 응답이 '대상 게시판 선택 팝업'인지 (목록이 비었더라도)."""
+    b = body or ""
+    return ("fboardmoveall" in b) or ('id="copymove"' in b) or ("move_update.php" in b)
 
 
 def _norm_ids(wr_ids) -> list[str]:
@@ -921,18 +1105,28 @@ def delete_posts(
     for w in ids:
         data.append((_CHK_FIELD, w))
     data.append(("btn_submit", DELETE_BTN_VALUE))   # board_list_update.php 동작 분기 키
-    headers = {"User-Agent": USER_AGENT, "Referer": board_list_url(bo, page)}
+    http = _HttpClient(session)
+    # 워밍업 — 브라우저처럼 게시판 목록 페이지를 먼저 한 번 GET
+    list_referer = board_list_url(bo, page)
     try:
-        resp = session.post(url, data=data, headers=headers,
-                            timeout=HTTP_TIMEOUT * 2, allow_redirects=True)
-    except requests.exceptions.RequestException as e:
+        http.get(list_referer, headers=http.headers(referer=f"{SORISEM_BASE_URL.rstrip('/')}/"),
+                 timeout=HTTP_TIMEOUT)
+    except Exception:
+        pass
+    headers = http.headers(referer=list_referer, post=True)
+    try:
+        resp = http.post(url, data=data, headers=headers,
+                         timeout=HTTP_TIMEOUT * 2, allow_redirects=True)
+    except Exception as e:
+        http.merge_back()
         return PostActionResult(ok=False, action="delete", bo_table=bo, message=f"네트워크 오류: {e}")
     body = resp.text or ""
+    http.merge_back()  # 새 쿠키를 원래 세션으로 — 이후 검증 GET 은 일반 requests
     snip = _collapse(body)
     if not resp.ok:
         return PostActionResult(ok=False, action="delete", bo_table=bo, status_code=resp.status_code,
                                 message=f"HTTP {resp.status_code}", response_snippet=snip)
-    bad = _looks_failed(body)
+    bad = _is_real_error_page(body)
     if bad:
         return PostActionResult(ok=False, action="delete", bo_table=bo, status_code=resp.status_code,
                                 message=f"사이트가 '{bad}' 라며 거부했습니다", response_snippet=snip)
@@ -985,29 +1179,107 @@ def move_posts(
     # 처리 전 대상 게시판 1쪽 글번호 — 나중에 새 글이 생겼는지로 성공 판정
     target_before = _list_first_page_ids(session, to_bo)
 
-    # 1단계: move.php — 대상 게시판 선택 팝업 폼 받기
-    step1: list[tuple[str, str]] = [("sw", sw), ("bo_table", bo)]
-    for k, v in (list_form or {}).items():
-        if k and not k.startswith("chk_wr_id") and not k.startswith("_") and k not in ("sw", "bo_table"):
-            step1.append((k, "" if v is None else str(v)))
+    # 1단계: move.php — 대상 게시판 선택 팝업 폼 받기.
+    #
+    # 실제 ar.basic 스킨의 목록 폼(fboardlist) HTML 필드 순서를 그대로 따라가야
+    # 서버가 브라우저와 같은 응답을 준다. 폼 순서:
+    #   bo_table → sfl → stx → spt → sca → page → sw → chk_wr_id[]×N → btn_submit
+    # JS 가 클릭한 submit 버튼만 폼 전송에 포함되므로 act 같은 임의 필드는 보내지 않는다.
+    btn_value = "선택복사" if copy else "선택이동"
+    lf = list_form or {}
+
+    def _lf(name: str, default: str = "") -> str:
+        v = lf.get(name, default)
+        return "" if v is None else str(v)
+
+    step1: list[tuple[str, str]] = [
+        ("bo_table", bo),
+        ("sfl", _lf("sfl")),
+        ("stx", _lf("stx")),
+        ("spt", _lf("spt")),
+        ("sca", _lf("sca")),
+        ("page", _lf("page", str(page) if page else "1")),
+        ("sw", sw),
+    ]
+    # 위에서 보낸 표준 필드 외에 list_form 에서 추가로 들어있는 hidden 만 덧붙임
+    # (token 등 스킨이 새로 도입한 필드 대비). 이미 보낸 것·예약 키는 제외.
+    _already = {k for k, _ in step1} | {"chk_wr_id[]", "btn_submit"}
+    for k, v in lf.items():
+        if not k or k.startswith("_") or k.startswith("chk_wr_id") or k in _already:
+            continue
+        step1.append((k, "" if v is None else str(v)))
     for w in ids:
         step1.append((_CHK_FIELD, w))
-    headers = {"User-Agent": USER_AGENT, "Referer": board_list_url(bo, page)}
+    step1.append(("btn_submit", btn_value))
+    # HTTP 클라이언트 — curl_cffi 가 있으면 크롬 TLS/HTTP 지문으로 위장.
+    http = _HttpClient(session)
+
+    # 1단계 워밍업 — 브라우저 관리자가 보통 거치는 순서대로 페이지를 방문.
+    # gnuboard 류는 가끔 admin 페이지 방문 직후에만 일부 admin 폼·쿼리가 풀린다.
+    base = SORISEM_BASE_URL.rstrip("/")
+    sys_url = f"{base}/_sys/"
     try:
-        r1 = session.post(MOVE_URL, data=step1, headers=headers,
-                          timeout=HTTP_TIMEOUT * 2, allow_redirects=True)
-    except requests.exceptions.RequestException as e:
+        adm = http.get(sys_url, headers=http.headers(referer=f"{base}/"),
+                       timeout=HTTP_TIMEOUT)
+        if adm is not None:
+            dbg["_sys/ (admin warmup)"] = (adm.text or "")[:30000]
+    except Exception:
+        pass
+
+    list_referer = board_list_url(bo, page)
+    try:
+        warm = http.get(list_referer, headers=http.headers(referer=sys_url),
+                        timeout=HTTP_TIMEOUT)
+        if warm is not None:
+            dbg["board.php (warmup)"] = (warm.text or "")[:60000]
+    except Exception:
+        pass
+
+    # 진단용: 도구가 보내는 헤더·쿠키 자체를 텍스트로 한 장 남겨 둠.
+    try:
+        cookie_lines = "\n".join(f"  {c.name} = {c.value}" for c in session.cookies)
+        headers_preview = http.headers(referer=list_referer, post=True)
+        impers = ("ON (curl_cffi, 크롬 TLS/HTTP 지문 위장)" if http.impersonated
+                  else "OFF (일반 requests — curl_cffi 미설치)")
+        diag = (
+            f"[Impersonation] {impers}\n\n"
+            "[Extra request headers (move.php POST)]\n"
+            + "\n".join(f"  {k}: {v}" for k, v in headers_preview.items())
+            + ("\n  (그 외 UA/Accept/sec-ch-ua 등은 curl_cffi 가 크롬 것으로 자동 세팅)"
+               if http.impersonated else "")
+            + "\n\n[Session cookies]\n"
+            + (cookie_lines or "  (none)")
+            + "\n\n[Form POST body keys]\n"
+            + "\n".join(f"  {k} = {v!r}" for k, v in step1)
+        )
+        dbg["request_diag"] = (
+            "<html><body><pre>" + diag.replace("<", "&lt;") + "</pre></body></html>"
+        )
+    except Exception:
+        pass
+
+    headers = http.headers(referer=list_referer, post=True)
+    try:
+        r1 = http.post(MOVE_URL, data=step1, headers=headers,
+                       timeout=HTTP_TIMEOUT * 2, allow_redirects=True)
+    except Exception as e:
+        http.merge_back()
         return PostActionResult(ok=False, action=act, bo_table=bo, message=f"네트워크 오류: {e}", debug=dbg)
     b1 = r1.text or ""
     dbg["move.php"] = b1[:60000]
     if not r1.ok:
+        http.merge_back()
         return PostActionResult(ok=False, action=act, bo_table=bo, status_code=r1.status_code,
                                 message=f"HTTP {r1.status_code} (move.php)", response_snippet=_collapse(b1), debug=dbg)
-    bad = _looks_failed(b1)
-    if bad:
-        return PostActionResult(ok=False, action=act, bo_table=bo, status_code=r1.status_code,
-                                message=f"{verb} 권한이 없거나 거부됨 (응답에 '{bad}' 포함)",
-                                response_snippet=_collapse(b1), debug=dbg)
+    # move.php 응답이 '대상 게시판 선택 팝업'이면 (목록이 비었더라도) 정상 — 그대로 진행.
+    # 명백한 에러 페이지일 때만 중단 (팝업 캡션 "게시판을 한개 이상 선택" 같은 오탐 회피).
+    if not _looks_like_move_popup(b1):
+        bad = _is_real_error_page(b1)
+        if bad:
+            http.merge_back()
+            return PostActionResult(ok=False, action=act, bo_table=bo, status_code=r1.status_code,
+                                    message=f"{verb} 단계1(move.php) 거부됨: {bad}",
+                                    response_snippet=_collapse(b1), debug=dbg)
 
     soup = BeautifulSoup(b1, "lxml")
     forms = soup.find_all("form")
@@ -1021,8 +1293,9 @@ def move_posts(
 
     data: dict[str, str] = {"sw": sw, "bo_table": bo}
     update_url = MOVE_UPDATE_URL
-    allowed: list[str] = []
-    target_field_names: list[str] = []
+    allowed: list[str] = []          # move.php 가 보여 준 '이동/복사 가능한' 게시판 후보
+    target_field_names: list[str] = []   # select 형태의 대상 필드 이름들
+    chk_target_field = ""            # 체크박스 형태의 대상 필드 이름 (보통 chk_bo_table[])
     if move_form is not None:
         a = (move_form.get("action") or "").strip()
         if a and not a.startswith("#") and not a.lower().startswith("javascript:"):
@@ -1035,6 +1308,13 @@ def move_posts(
             if itype in _SKIP_INPUT_TYPES:
                 continue
             if itype in ("checkbox", "radio"):
+                # ar.basic: 대상 게시판은 <input type=checkbox name="chk_bo_table[]" value="<게시판>">
+                # tbody 안에 한 줄씩 들어 있다. 후보 목록(allowed) 으로 수집.
+                if "bo_table" in n:
+                    chk_target_field = n
+                    cv = (el.get("value") or "").strip()
+                    if cv:
+                        allowed.append(cv)
                 if el.has_attr("checked"):
                     data[n] = el.get("value", "1")
             else:
@@ -1047,49 +1327,82 @@ def move_posts(
                     for o in sel.find_all("option")]
             opts = [o for o in opts if o]
             if "bo_table" in n or n in ("to_table", "to_bo", "tbo"):
-                allowed = opts
+                allowed.extend(opts)
                 target_field_names.append(n)
             chosen = ""
             for o in sel.find_all("option"):
                 if o.has_attr("selected"):
                     chosen = o.get("value", o.get_text(strip=True))
             data[n] = chosen or (opts[0] if opts else "")
+    # 중복 제거 (순서 유지)
+    allowed = list(dict.fromkeys(a for a in allowed if a))
     joined = ",".join(ids)
     for fname in ("wr_id_list", "wr_ids", "wr_id"):   # 스킨마다 글번호 필드명이 다름
         if not data.get(fname):
             data[fname] = joined
     data.setdefault("act", "복사" if copy else "이동")  # ar 스킨이 메시지/분기에 쓰는 한글 verb
+
     if allowed and to_bo not in allowed:
+        # 사이트가 후보를 줬는데 그 안에 대상이 없음 → 명백한 거부.
+        http.merge_back()
         return PostActionResult(
             ok=False, action=act, bo_table=bo, target_bo_table=to_bo,
             message=(f"대상 게시판 '{to_bo}' 으로는 {verb}할 수 없습니다. "
-                     f"가능한 게시판: {', '.join(allowed) if allowed else '(없음)'}"),
+                     f"이 계정이 {verb}할 수 있는 게시판: {', '.join(allowed)}"),
             status_code=r1.status_code, response_snippet=_collapse(b1), debug=dbg,
         )
+    target_list_was_empty = not allowed
+    # move.php 가 대상 게시판 후보를 하나도 보여 주지 않은 경우. 브라우저 흐름에서는
+    # 채워져 오는 것을 같은 계정·같은 세션으로 우리 도구가 받으면 비어 오는 사례 있음.
+    # move_update.php 가 chk_bo_table[] 를 직접 처리하는 스킨도 있으므로 일단 시도는
+    # 해 보되, 실패하면 메시지에 진단·후속 조치 안내를 덧붙인다.
+    empty_hint = (
+        ""
+        if not target_list_was_empty
+        else (
+            " ※ 진단: move.php 가 대상 게시판 목록을 빈 채로 내려줘서 chk_bo_table[] 로"
+            " 직접 요청했는데도 처리가 안 됐습니다. 이 계정이 대상 게시판"
+            f" '{to_bo}' (또는 그 게시판이 속한 그룹)의 게시판관리자·그룹회원으로"
+            " 등록돼 있는지 소리샘 담당자에게 확인해 주세요. data/dumps 의"
+            " move_update_php.html 을 함께 보내 주시면 더 정확히 짚을 수 있습니다."
+        )
+    )
     # 대상 게시판 지정 — 소리샘(ar) 은 chk_bo_table[] 체크박스, 구형 그누보드는 to_bo_table select.
     data["to_bo_table"] = to_bo
-    data["chk_bo_table[]"] = to_bo
+    data[chk_target_field or "chk_bo_table[]"] = to_bo
     for n in target_field_names:
         data[n] = to_bo
 
-    # 2단계: move_update.php — 실제 처리
+    # 2단계: move_update.php — 실제 처리 (위장 클라이언트로)
     try:
-        r2 = session.post(update_url, data=data,
-                          headers={"User-Agent": USER_AGENT, "Referer": MOVE_URL},
-                          timeout=HTTP_TIMEOUT * 2, allow_redirects=True)
-    except requests.exceptions.RequestException as e:
+        r2 = http.post(
+            update_url, data=data,
+            headers=http.headers(referer=MOVE_URL, post=True),
+            timeout=HTTP_TIMEOUT * 2, allow_redirects=True,
+        )
+    except Exception as e:
+        http.merge_back()
         return PostActionResult(ok=False, action=act, bo_table=bo, target_bo_table=to_bo,
                                 message=f"네트워크 오류: {e}", debug=dbg)
     b2 = r2.text or ""
+    # 위장 세션이 받은 새 쿠키를 원래 세션으로 되돌림 — 이후 검증 GET 은 일반 requests 로.
+    http.merge_back()
     dbg["move_update.php"] = b2[:60000]
+    # 결과 검증을 위해 대상 게시판 1쪽 목록 HTML 도 그대로 덤프.
+    try:
+        target_html = fetch_board_list_html(session, to_bo, 1)
+        if target_html:
+            dbg[f"대상 게시판({to_bo}) 목록 GET"] = target_html[:60000]
+    except Exception:
+        pass
     snip = f"[move.php] {_collapse(b1, 350)}  ||  [move_update.php] {_collapse(b2, 350)}"
     if not r2.ok:
         return PostActionResult(ok=False, action=act, bo_table=bo, target_bo_table=to_bo, status_code=r2.status_code,
                                 message=f"HTTP {r2.status_code} (move_update.php)", response_snippet=snip, debug=dbg)
-    bad = _looks_failed(b2)
+    bad = _is_real_error_page(b2)
     if bad:
         return PostActionResult(ok=False, action=act, bo_table=bo, target_bo_table=to_bo, status_code=r2.status_code,
-                                message=f"사이트가 '{bad}' 라며 거부했습니다", response_snippet=snip, debug=dbg)
+                                message=f"사이트가 '{bad}' 라며 거부했습니다.{empty_hint}", response_snippet=snip, debug=dbg)
 
     # --- 처리 결과 검증 ---
     if not copy:
@@ -1101,7 +1414,7 @@ def move_posts(
         if gone is False:
             return PostActionResult(ok=False, action=act, bo_table=bo, target_bo_table=to_bo,
                                     status_code=r2.status_code, response_snippet=snip, debug=dbg,
-                                    message=f"이동되지 않았습니다 - {gmsg}")
+                                    message=f"이동되지 않았습니다 - {gmsg}{empty_hint}")
         # gone is None → 대상 게시판 확인으로
     appeared, amsg = _verify_appeared(session, to_bo, len(ids), target_before)
     if appeared is True:
@@ -1110,8 +1423,7 @@ def move_posts(
     if appeared is False:
         return PostActionResult(ok=False, action=act, bo_table=bo, target_bo_table=to_bo,
                                 status_code=r2.status_code, response_snippet=snip, debug=dbg,
-                                message=(f"{verb}가 안 된 것 같습니다 - {amsg}. "
-                                         "결과창에 적힌 사이트 응답을 개발자에게 보내 주세요."))
+                                message=(f"{verb}가 안 된 것 같습니다 - {amsg}.{empty_hint or ' 결과창에 적힌 사이트 응답을 개발자에게 보내 주세요.'}"))
     # appeared is None → 마지막으로 응답 문구로만 추정 (엄격: '복사/이동 …되었습니다' 류만 인정)
     if _strict_success(b2, act):
         return PostActionResult(ok=True, action=act, bo_table=bo, target_bo_table=to_bo, count=len(ids),
@@ -1120,4 +1432,4 @@ def move_posts(
     return PostActionResult(ok=False, action=act, bo_table=bo, target_bo_table=to_bo, status_code=r2.status_code,
                             response_snippet=snip, debug=dbg,
                             message=(f"{verb} 결과를 확인하지 못했습니다 - 대상 게시판에 새 글이 안 보이고 "
-                                     "응답에도 완료 표시가 없습니다. 결과창의 사이트 응답을 개발자에게 보내 주세요."))
+                                     f"응답에도 완료 표시가 없습니다.{empty_hint or ' 결과창의 사이트 응답을 개발자에게 보내 주세요.'}"))

@@ -46,6 +46,7 @@ class PendingMemberDialog(wx.Dialog):
         seen_store=None,
         level_history=None,
         mail_sender=None,
+        blocklist=None,
     ):
         super().__init__(
             parent,
@@ -60,6 +61,8 @@ class PendingMemberDialog(wx.Dialog):
         self.seen_store: PendingSeenStore = seen_store or PendingSeenStore()
         self.level_history = level_history
         self.mail_sender = mail_sender
+        # 장기미접속 탈퇴자 재가입 차단 명단 (core.withdrawn_blocklist.WithdrawnBlocklist)
+        self.blocklist = blocklist
         # 승인 시 환영 메일 자동 발송 — 발송 결과를 보고용으로 누적
         self.welcome_mails_sent: int = 0
         self.welcome_mails_failed: int = 0
@@ -94,10 +97,13 @@ class PendingMemberDialog(wx.Dialog):
         self.approve_btn = wx.Button(panel, wx.ID_ANY, "승인(&A)")
         self.reject_btn = wx.Button(panel, wx.ID_ANY, "거부(&R)")
         self.defer_btn = wx.Button(panel, wx.ID_ANY, "미루기(&S)")
+        # 장기미접속 탈퇴자 명단에서 빼기 — 해당 회원일 때만 활성화됨
+        self.unblock_btn = wx.Button(panel, wx.ID_ANY, "탈퇴자 명단에서 빼기(&U)")
         self.close_btn = wx.Button(panel, wx.ID_CLOSE, "끝내기(&C)")
         btn_sizer.Add(self.approve_btn, 0, wx.ALL, 5)
         btn_sizer.Add(self.reject_btn, 0, wx.ALL, 5)
         btn_sizer.Add(self.defer_btn, 0, wx.ALL, 5)
+        btn_sizer.Add(self.unblock_btn, 0, wx.ALL, 5)
         btn_sizer.Add(self.close_btn, 0, wx.ALL, 5)
         sizer.Add(btn_sizer, 0, wx.ALIGN_CENTER | wx.ALL, 8)
 
@@ -105,6 +111,7 @@ class PendingMemberDialog(wx.Dialog):
         self.approve_btn.Bind(wx.EVT_BUTTON, self._on_approve)
         self.reject_btn.Bind(wx.EVT_BUTTON, self._on_reject)
         self.defer_btn.Bind(wx.EVT_BUTTON, self._on_defer)
+        self.unblock_btn.Bind(wx.EVT_BUTTON, self._on_unblock)
         self.close_btn.Bind(wx.EVT_BUTTON, lambda e: self._finish())
         self.Bind(wx.EVT_CHAR_HOOK, self._on_char_hook)
 
@@ -124,8 +131,11 @@ class PendingMemberDialog(wx.Dialog):
         days_text = f"{days}일 전" if days is not None else "알 수 없음"
         seen = "이전에 본 적 있음 (미룸)" if pm.seen_before else "처음 알림"
 
+        blocked = bool(pm.was_withdrawn_inactive)
+
         self.header.SetLabel(
             f"{self.idx + 1} / {len(self.pendings)} — {m.user_id} ({nick})"
+            + ("  ※ 장기미접속 탈퇴자" if blocked else "")
         )
         lines = [
             f"아이디: {m.user_id}",
@@ -134,19 +144,49 @@ class PendingMemberDialog(wx.Dialog):
             f"현재 등급: {level_label} (레벨 {m.level})",
             f"가입일: {join} ({days_text})",
             f"상태: {seen}",
+        ]
+        if blocked:
+            info = pm.withdrawn_info or {}
+            when = info.get("date", "")
+            why = info.get("reason", "")
+            lines += [
+                "",
+                "★★★ 주의: 이 아이디는 장기미접속으로 '탈퇴' 처리됐던 회원입니다. ★★★",
+                f"  탈퇴 처리 시각: {when or '기록 없음'}",
+                f"  사유: {why or '장기미접속'}",
+                "  → '승인' 은 막혀 있습니다. 재가입을 받으려면 먼저",
+                "    [U] '탈퇴자 명단에서 빼기' 를 누른 뒤 승인하세요. (또는 '거부' 처리)",
+            ]
+        lines += [
             "",
-            "[A] 승인 → 준회원으로 등급 변경",
+            ("[A] 승인 → (막힘: 장기미접속 탈퇴자)" if blocked
+             else "[A] 승인 → 준회원으로 등급 변경"),
             "[R] 거부 → 거부 등급으로 등급 변경",
             "[S] 미루기 → 이번에는 건너뛰고 다음에 다시 알림",
-            "[C] 끝내기 → 남은 회원 그대로 두고 닫기",
         ]
+        if blocked:
+            lines.append("[U] 탈퇴자 명단에서 빼기 → 이후 승인 가능")
+        lines.append("[C] 끝내기 → 남은 회원 그대로 두고 닫기")
         self.detail.SetValue("\n".join(lines))
 
-        speak(
-            f"{self.idx + 1}번째 신규 가입자. {nick}, "
-            f"가입 {days_text}. 승인, 거부, 미루기 중 골라주세요."
-        )
-        self.approve_btn.SetFocus()
+        # 버튼 활성/비활성
+        self.approve_btn.Enable(not blocked)
+        self.unblock_btn.Enable(blocked)
+        self.unblock_btn.Show(blocked)
+
+        if blocked:
+            speak(
+                f"{self.idx + 1}번째 신규 가입자. {nick}. "
+                "주의. 이 아이디는 장기미접속으로 탈퇴 처리됐던 회원입니다. "
+                "승인은 막혀 있습니다. 거부, 미루기, 또는 탈퇴자 명단에서 빼기 중 골라주세요."
+            )
+            self.reject_btn.SetFocus()
+        else:
+            speak(
+                f"{self.idx + 1}번째 신규 가입자. {nick}, "
+                f"가입 {days_text}. 승인, 거부, 미루기 중 골라주세요."
+            )
+            self.approve_btn.SetFocus()
 
     # ---------- 액션 ----------
 
@@ -154,6 +194,15 @@ class PendingMemberDialog(wx.Dialog):
         pm = self.pendings[self.idx]
         m = pm.member
         nick = m.nickname or m.name or m.user_id
+        if pm.was_withdrawn_inactive:
+            # 안전장치 — 버튼은 비활성이지만 단축키/포커스 우회 대비
+            speak("이 회원은 장기미접속 탈퇴자라 승인할 수 없습니다.")
+            wx.MessageBox(
+                f"{m.user_id} ({nick}) 회원은 장기미접속으로 '탈퇴' 처리됐던 아이디입니다.\n"
+                "승인하려면 먼저 '탈퇴자 명단에서 빼기'(U) 를 누르세요.",
+                "승인 불가", wx.OK | wx.ICON_WARNING,
+            )
+            return
         confirm = wx.MessageBox(
             f"{m.user_id} ({nick}) 회원을 "
             f"{LEVEL_LABELS.get(APPROVE_TO_LEVEL, '준회원')}로 승인합니다.\n"
@@ -164,6 +213,37 @@ class PendingMemberDialog(wx.Dialog):
         if confirm != wx.YES:
             return
         self._apply_change(m, APPROVE_TO_LEVEL, label="승인")
+
+    def _on_unblock(self, event=None) -> None:
+        pm = self.pendings[self.idx]
+        m = pm.member
+        nick = m.nickname or m.name or m.user_id
+        if not pm.was_withdrawn_inactive:
+            return
+        confirm = wx.MessageBox(
+            f"{m.user_id} ({nick}) 회원을 '장기미접속 탈퇴자' 명단에서 뺍니다.\n"
+            "이후 이 회원은 정상적으로 승인할 수 있게 됩니다. 계속하시겠습니까?",
+            "탈퇴자 명단에서 빼기 확인",
+            wx.YES_NO | wx.ICON_QUESTION | wx.NO_DEFAULT,
+        )
+        if confirm != wx.YES:
+            return
+        if self.blocklist is not None:
+            try:
+                self.blocklist.remove(m.user_id)
+            except Exception:
+                pass
+        pm.was_withdrawn_inactive = False
+        pm.withdrawn_info = None
+        if self.log_writer is not None:
+            try:
+                self.log_writer.write_event(
+                    f"unblock_withdrawn user={m.user_id} actor={self.admin_user_id}"
+                )
+            except Exception:
+                pass
+        speak(f"{m.user_id} 회원을 탈퇴자 명단에서 뺐습니다. 이제 승인할 수 있습니다.")
+        self._show_current()   # 화면 갱신 — 승인 버튼 활성화
 
     def _on_reject(self, event=None) -> None:
         pm = self.pendings[self.idx]
@@ -263,6 +343,12 @@ class PendingMemberDialog(wx.Dialog):
 
         if label == "승인":
             self.approved.append(member)
+            # 승인됐으면 장기미접속 탈퇴자 명단에서 제거 (재가입을 정식 허가한 것이므로)
+            if self.blocklist is not None:
+                try:
+                    self.blocklist.remove(member.user_id)
+                except Exception:
+                    pass
             # v1.0+: 승인 시 환영 메일 자동 발송 (rtgreen 으로 로그인된 경우)
             self._send_welcome_mail(member)
             speak(f"{member.user_id} 회원을 승인했습니다.")

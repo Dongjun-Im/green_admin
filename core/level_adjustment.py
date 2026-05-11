@@ -6,7 +6,7 @@ from typing import Callable, Optional
 
 from dateutil.relativedelta import relativedelta
 
-from config import INACTIVITY_MONTHS, LEVEL_TRANSITIONS
+from config import INACTIVITY_MONTHS, LEVEL_TRANSITIONS, WITHDRAW_LEVEL
 from core.crawler import MemberCrawler
 from core.member_admin import MemberAdminAdapter
 from core.models import (
@@ -31,6 +31,7 @@ class LevelAdjustmentService:
         admin_user_id: str,
         cutoff_provider: Optional[Callable[[], date]] = None,
         log_writer=None,
+        blocklist=None,
     ) -> None:
         self.crawler = crawler
         self.admin = admin
@@ -39,6 +40,9 @@ class LevelAdjustmentService:
             lambda: date.today() - relativedelta(months=self.INACTIVITY_MONTHS)
         )
         self.log_writer = log_writer
+        # 장기미접속으로 '탈퇴'(WITHDRAW_LEVEL) 처리된 회원 아이디를 보관해 두는
+        # 명단(core.withdrawn_blocklist.WithdrawnBlocklist). 재가입 시 자동 거름용.
+        self.blocklist = blocklist
 
     def build_plan(
         self,
@@ -126,6 +130,21 @@ class LevelAdjustmentService:
                     report.succeeded_delete.append(item.member)
                 else:
                     report.succeeded_demote.append(item.member)
+            # 장기미접속 '탈퇴' 처리된 회원을 재가입 차단 명단에 기록.
+            # dry_run 모의 실행에서는 기록하지 않는다.
+            if self.blocklist is not None and not getattr(self.admin, "dry_run", False):
+                try:
+                    entries = [
+                        (item.member.user_id,
+                         getattr(item.member, "nickname", "") or "",
+                         f"장기미접속 탈퇴 ({item.reason})")
+                        for item in actionable
+                        if item.to_level == WITHDRAW_LEVEL
+                    ]
+                    if entries:
+                        self.blocklist.add_many(entries)
+                except Exception:
+                    pass
         else:
             for item in actionable:
                 report.failed.append((item.member, result.message))

@@ -27,6 +27,10 @@ class PendingMember:
     """가입 대기/신청 상태인 회원 한 명."""
     member: Member
     seen_before: bool = False    # 이전 실행에서 이미 알림한 적이 있는가
+    # 장기미접속으로 '탈퇴' 처리됐던 아이디가 다시 가입 신청으로 나타난 경우 True.
+    # 이 경우 승인 화면에서 '승인' 버튼이 막힌다.
+    was_withdrawn_inactive: bool = False
+    withdrawn_info: Optional[dict] = None   # 명단에 기록된 부가정보 (날짜·사유 등)
 
     @property
     def join_date(self) -> Optional[date]:
@@ -97,8 +101,14 @@ def find_pending(
     members: list[Member],
     seen_store: Optional[PendingSeenStore] = None,
     only_unseen: bool = True,
+    blocklist=None,
 ) -> list[PendingMember]:
-    """대기·신청 등급 회원 추출. only_unseen=True 면 이미 알림한 회원 제외."""
+    """대기·신청 등급 회원 추출. only_unseen=True 면 이미 알림한 회원 제외.
+
+    blocklist(core.withdrawn_blocklist.WithdrawnBlocklist) 가 주어지면, 장기미접속
+    으로 '탈퇴' 처리됐던 아이디는 was_withdrawn_inactive=True 로 표시한다 (목록에서
+    빼지는 않는다 — 관리자가 보고 거부 처리하도록).
+    """
     out: list[PendingMember] = []
     for m in members:
         if m.level not in PENDING_LEVELS:
@@ -108,7 +118,12 @@ def find_pending(
         )
         if only_unseen and seen:
             continue
-        out.append(PendingMember(member=m, seen_before=seen))
+        blocked = blocklist is not None and blocklist.contains(m.user_id)
+        info = blocklist.info(m.user_id) if blocked else None
+        out.append(PendingMember(
+            member=m, seen_before=seen,
+            was_withdrawn_inactive=blocked, withdrawn_info=info,
+        ))
 
     # 가입일 최신 우선 (최신 신청자가 먼저 보임)
     out.sort(

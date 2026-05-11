@@ -48,6 +48,7 @@ from core.pending_members import PendingSeenStore, find_pending
 from core.promotion_service import PromotionPlan, PromotionReport, PromotionService
 from core.schedule_tracker import ScheduleTracker
 from core.undo_stack import UndoEntry, UndoItem, UndoStack
+from core.withdrawn_blocklist import WithdrawnBlocklist
 from screen_reader import cancel_speech, speak
 from ui.backup_diff_dialog import BackupDiffDialog
 from ui.confirm_dialog import ConfirmAdjustmentDialog
@@ -130,6 +131,8 @@ class MainFrame(wx.Frame):
         self.undo_stack = UndoStack()
         self.pending_seen = PendingSeenStore()
         self.level_history = LevelHistoryStore()
+        # 장기미접속으로 '탈퇴' 처리된 회원 명단 — 재가입 시 승인 자동 차단
+        self.inactivity_blocklist = WithdrawnBlocklist()
 
         self._build_menu()
         self._build_ui()
@@ -554,6 +557,7 @@ class MainFrame(wx.Frame):
             log_writer=self.log_writer,
             undo_stack=self.undo_stack,
             level_history=self.level_history,
+            blocklist=self.inactivity_blocklist,
         )
         dlg.ShowModal()
         if dlg.changed_count > 0:
@@ -739,6 +743,7 @@ class MainFrame(wx.Frame):
             admin,
             admin_user_id=self.admin_user_id,
             log_writer=self.log_writer,
+            blocklist=self.inactivity_blocklist,
         )
 
         def worker(progress_cb):
@@ -819,6 +824,7 @@ class MainFrame(wx.Frame):
             admin,
             admin_user_id=self.admin_user_id,
             log_writer=self.log_writer,
+            blocklist=self.inactivity_blocklist,
         )
         try:
             report = service.apply_plan(plan, progress_cb=self._item_progress_cb)
@@ -1365,6 +1371,7 @@ class MainFrame(wx.Frame):
             members,
             seen_store=self.pending_seen,
             only_unseen=only_unseen,
+            blocklist=self.inactivity_blocklist,
         )
         if not pendings:
             speak("처리할 신규 가입자가 없습니다.")
@@ -1393,6 +1400,7 @@ class MainFrame(wx.Frame):
             seen_store=self.pending_seen,
             level_history=self.level_history,
             mail_sender=self.mail_sender,
+            blocklist=self.inactivity_blocklist,
         )
         dlg.ShowModal()
         # 결과 보고

@@ -1,6 +1,8 @@
 # -*- mode: python ; coding: utf-8 -*-
 import os
 
+from PyInstaller.utils.hooks import collect_all
+
 block_cipher = None
 app_dir = os.path.abspath('.')
 
@@ -13,10 +15,17 @@ _extra_datas = []
 if os.path.isfile(_credentials_path):
     _extra_datas.append((_credentials_path, '.'))
 
+# curl_cffi 는 _wrapper.pyd 안에 libcurl-impersonate 가 정적 링크돼 있어 보통
+# 자동으로 묶이지만, 확실히 하기 위해 collect_all 로 데이터·바이너리·서브모듈을 모두 수집.
+try:
+    _cc_datas, _cc_binaries, _cc_hidden = collect_all('curl_cffi')
+except Exception:
+    _cc_datas, _cc_binaries, _cc_hidden = [], [], []
+
 a = Analysis(
     ['main.py'],
     pathex=[app_dir],
-    binaries=[],
+    binaries=list(_cc_binaries),
     datas=[
         (os.path.join(app_dir, 'green_auth'), 'green_auth'),
         (os.path.join(app_dir, 'sounds'), 'sounds'),
@@ -25,8 +34,8 @@ a = Analysis(
         (os.path.join(app_dir, 'tools'), 'tools'),
         # 사용방법.txt 는 한글 파일명 인코딩 이슈로 spec 에서 제외.
         # 필요하면 dist 폴더 옆에 수동으로 복사.
-    ] + _extra_datas,
-    hiddenimports=[
+    ] + _extra_datas + list(_cc_datas),
+    hiddenimports=list(_cc_hidden) + [
         # green_auth 패키지
         'green_auth',
         'green_auth.auth_app',
@@ -62,6 +71,7 @@ a = Analysis(
         'core.activity_counter',
         'core.mvp_service',
         'core.pending_members',
+        'core.withdrawn_blocklist',
         # core 패키지 (v1.0 신규)
         'core.level_history',
         'core.site_diagnostics',
@@ -142,6 +152,14 @@ a = Analysis(
         'urllib3',
         'charset_normalizer',
         'idna',
+        # curl_cffi — 게시판 복사/이동/삭제 시 크롬 TLS/HTTP 지문 위장
+        'curl_cffi',
+        'curl_cffi.requests',
+        'curl_cffi.requests.session',
+        'curl_cffi.const',
+        'curl_cffi.curl',
+        'curl_cffi._wrapper',
+        '_cffi_backend',
         # 토스 거래내역 복호화 (자료실 구독비 관리)
         'msoffcrypto',
         'olefile',

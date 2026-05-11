@@ -31,6 +31,7 @@ data/member_notes.db
 data/undo_stack.json
 data/pending_seen.json
 data/admin_flags.json
+data/inactivity_withdrawn.json
 
 # Sensitive user credentials (if green_auth writes here)
 data/credentials.ini

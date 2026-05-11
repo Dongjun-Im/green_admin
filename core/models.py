@@ -120,6 +120,17 @@ class AdminActionResult:
     request_url: str = ""
     request_payload: dict = field(default_factory=dict)
     response_snippet: str = ""
+    # 진단용으로 디스크에 저장한 HTML 덤프 경로들 ({라벨: 파일경로}).
+    # 실제 등급 변경이 사이트에 안 먹는 경우 이 파일을 보면 폼 구조·토큰·응답을 확인 가능.
+    debug: dict = field(default_factory=dict)
+    # 변경 후 재조회로 실제 반영 여부를 확인한 결과 (True/False/None=확인불가).
+    verified: bool | None = None
+    # 실제로 사이트에 보낸 옵션 값({mb_id: 실제 site value(int)}). LEVEL_LABELS 가
+    # 사이트 폼의 옵션 매핑과 어긋난 스킨에서, 호출자가 메모리 모델을 갱신할 때 쓰는 값.
+    effective_levels: dict = field(default_factory=dict)
+    # 변경 후 사이트가 보여 준 등급 라벨({mb_id: 라벨 문자열}). UI 갱신용 — LEVEL_LABELS
+    # 매핑보다 사이트 폼이 실제로 쓰는 텍스트가 더 정확하다.
+    effective_labels: dict = field(default_factory=dict)
 
 
 @dataclass

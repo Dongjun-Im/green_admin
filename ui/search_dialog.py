@@ -14,7 +14,7 @@ from typing import Optional
 import requests
 import wx
 
-from config import LEVEL_LABELS, SELECTABLE_LEVELS
+from config import LEVEL_LABELS, SELECTABLE_LEVELS, WITHDRAW_LEVEL
 from core.admin_flags import AdminFlagsStore
 from core.member_admin import MemberAdminAdapter
 from core.member_notes import MemberNotesStore
@@ -40,6 +40,7 @@ class MemberSearchDialog(wx.Dialog):
         log_writer=None,
         undo_stack=None,
         level_history=None,
+        blocklist=None,
     ):
         super().__init__(
             parent,
@@ -53,6 +54,8 @@ class MemberSearchDialog(wx.Dialog):
         self.log_writer = log_writer
         self.undo_stack = undo_stack
         self.level_history = level_history
+        # 장기미접속 탈퇴자 재가입 차단 명단 (core.withdrawn_blocklist.WithdrawnBlocklist)
+        self.blocklist = blocklist
         self.notes_store = MemberNotesStore()
         # 보유한 회원 ID 들의 메모를 한 번에 캐시 (검색 결과 렌더 빠르게)
         self._notes_cache = self.notes_store.get_many(
@@ -156,6 +159,12 @@ class MemberSearchDialog(wx.Dialog):
         self.bulk_btn = wx.Button(
             panel, wx.ID_ANY, ">> 일괄 등급 변경(&B) <<"
         )
+        # 선택한 회원을 사이트 등급 '탈퇴'(WITHDRAW_LEVEL) 로 내리는 전용 버튼.
+        self.withdraw_btn = wx.Button(panel, wx.ID_ANY, "탈퇴 처리(&W)")
+        self.withdraw_btn.SetToolTip(
+            "선택한 회원을 사이트 등급 '탈퇴' 로 내립니다. 확인창에서 "
+            "재가입 승인 차단 여부를 고를 수 있습니다. 단축키: Alt+W"
+        )
         # v1.0.6: 버튼은 항상 활성. 세션이 없으면 클릭 시 안내만 띄움 — 비활성화
         # 상태가 "버튼이 안 눌린다" 라는 사용자 혼동을 만든 사례가 있어 변경.
         self.check_all_btn = wx.Button(panel, wx.ID_ANY, "모두 체크(&A)")
@@ -167,7 +176,7 @@ class MemberSearchDialog(wx.Dialog):
         # v1.0.6: WrapSizer 가 일부 환경에서 버튼을 화면 밖으로 미루는 사례가
         # 있어, 단순 BoxSizer 두 줄 + EXPAND 로 대체.
         primary_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        for b in (self.bulk_btn, self.change_btn, self.note_btn, close_btn):
+        for b in (self.bulk_btn, self.change_btn, self.withdraw_btn, self.note_btn, close_btn):
             primary_sizer.Add(b, 1, wx.ALL | wx.EXPAND, 4)
         sizer.Add(primary_sizer, 0, wx.EXPAND | wx.ALL, 4)
 
@@ -186,6 +195,7 @@ class MemberSearchDialog(wx.Dialog):
         self.list_box.Bind(wx.EVT_CHECKLISTBOX, self._on_check_toggle)
         self.change_btn.Bind(wx.EVT_BUTTON, self._on_change_level)
         self.bulk_btn.Bind(wx.EVT_BUTTON, self._on_bulk_change)
+        self.withdraw_btn.Bind(wx.EVT_BUTTON, self._on_withdraw)
         # 상단 버튼도 동일 핸들러
         self.top_bulk_btn.Bind(wx.EVT_BUTTON, self._on_bulk_change)
         self.check_all_btn.Bind(wx.EVT_BUTTON, self._on_check_all)
@@ -205,6 +215,7 @@ class MemberSearchDialog(wx.Dialog):
         admin_id = self.admin_toggle_btn.GetId()
         check_all_id = self.check_all_btn.GetId()
         uncheck_id = self.uncheck_all_btn.GetId()
+        withdraw_id = self.withdraw_btn.GetId()
         accels = [
             (wx.ACCEL_CTRL, ord("B"), bulk_id),
             (wx.ACCEL_NORMAL, wx.WXK_F2, bulk_id),
@@ -214,6 +225,7 @@ class MemberSearchDialog(wx.Dialog):
             (wx.ACCEL_ALT, ord("A"), check_all_id),
             (wx.ACCEL_ALT, ord("U"), uncheck_id),
             (wx.ACCEL_ALT, ord("M"), admin_id),
+            (wx.ACCEL_ALT, ord("W"), withdraw_id),
         ]
         self.SetAcceleratorTable(wx.AcceleratorTable(accels))
 
@@ -660,23 +672,63 @@ class MemberSearchDialog(wx.Dialog):
 
         self._apply_level_change(member, new_level)
 
-    def _apply_level_change(self, member: Member, new_level: int) -> None:
+    def _apply_level_change(
+        self,
+        member: Member,
+        new_level: int,
+        *,
+        source: str = "manual",
+        reason: str = "검색에서 수동 변경",
+        undo_label: str | None = None,
+        action_word: str | None = None,
+    ) -> bool:
+        """선택 회원의 등급을 사이트에 즉시 반영. 성공 시 True.
+
+        source/reason 은 등급 이력·로그에 남길 출처/사유 문구.
+        action_word 가 주어지면 음성·로그의 '강등/승급' 대신 그 단어를 쓴다 (예: "탈퇴 처리").
+        """
         from_level = member.level
         admin = MemberAdminAdapter(self.session, dry_run=False)
         result = admin.change_level(member, new_level)
+
+        def _dump_lines() -> str:
+            d = getattr(result, "debug", None) or {}
+            if not d:
+                return ""
+            return "\n\n[진단용 저장 파일]\n" + "\n".join(f"· {k}: {v}" for k, v in d.items())
 
         if not result.success:
             speak("등급 변경에 실패했습니다.")
             self._modal_msg(
                 f"등급 변경 실패: {result.message}\n"
-                f"응답 일부: {result.response_snippet[:200]}",
+                f"응답 일부: {result.response_snippet[:200]}"
+                f"{_dump_lines()}",
                 "오류",
                 wx.ICON_ERROR,
             )
-            return
+            return False
+        if getattr(result, "verified", None) is None and _dump_lines():
+            # 변경 요청은 보냈으나 재조회로 반영 여부를 확인 못 함 — 사용자에게 경고.
+            speak("변경 요청은 보냈지만 사이트 반영 여부를 확인하지 못했습니다.")
+            self._modal_msg(
+                f"{result.message}\n\n웹 브라우저에서 해당 회원 등급을 직접 확인해 주세요."
+                f"{_dump_lines()}",
+                "확인 필요",
+                wx.ICON_WARNING,
+            )
 
-        member.level = new_level
-        member.level_label = LEVEL_LABELS.get(new_level, str(new_level))
+        # 사이트 폼의 실제 옵션 값과 라벨로 모델을 갱신해야 웹·앱 표시가 일치한다.
+        # (LEVEL_LABELS 가 사이트 스킨의 cl_level 매핑과 다른 경우 대비)
+        site_level = getattr(result, "effective_levels", {}).get(member.user_id)
+        site_label = getattr(result, "effective_labels", {}).get(member.user_id)
+        if isinstance(site_level, int):
+            member.level = site_level
+        else:
+            member.level = new_level
+        if site_label:
+            member.level_label = site_label
+        else:
+            member.level_label = LEVEL_LABELS.get(member.level, str(member.level))
         # v1.0.3: 등급을 변경했으면 동호회관리자 그룹에서도 빠져야 한다.
         # 메모리 플래그 + 영구 저장(admin_flags.json) 모두 클리어.
         if member.is_admin:
@@ -684,16 +736,19 @@ class MemberSearchDialog(wx.Dialog):
             self.admin_flags.unmark(member.user_id)
         self.changed_count += 1
 
+        # to_level 은 사이트가 실제로 받아들인 값을 우선 사용 — undo/이력의 일관성.
+        actual_to_level = member.level if isinstance(member.level, int) else new_level
+
         if self.undo_stack is not None:
             try:
                 from core.undo_stack import UndoItem
                 self.undo_stack.push(
-                    label=f"수동 등급 변경 ({member.user_id})",
+                    label=undo_label or f"수동 등급 변경 ({member.user_id})",
                     items=[UndoItem(
                         user_id=member.user_id,
                         nickname=member.nickname,
                         from_level=from_level,
-                        to_level=new_level,
+                        to_level=actual_to_level,
                     )],
                 )
             except Exception:
@@ -705,9 +760,9 @@ class MemberSearchDialog(wx.Dialog):
                     user_id=member.user_id,
                     nickname=member.nickname,
                     from_level=from_level,
-                    to_level=new_level,
-                    source="manual",
-                    reason="검색에서 수동 변경",
+                    to_level=actual_to_level,
+                    source=source,
+                    reason=reason,
                     actor=self.admin_user_id,
                 )
             except Exception:
@@ -716,7 +771,10 @@ class MemberSearchDialog(wx.Dialog):
         if self.log_writer is not None:
             try:
                 from core.models import AdjustmentItem
-                direction = "수동 강등" if new_level < from_level else "수동 승급"
+                if action_word:
+                    direction = action_word
+                else:
+                    direction = "수동 강등" if new_level < from_level else "수동 승급"
                 item = AdjustmentItem(
                     member=member,
                     action="demote",
@@ -732,11 +790,315 @@ class MemberSearchDialog(wx.Dialog):
         # v1.0.3: 단건 변경 후에도 현재 필터에서 벗어나면 목록에서 사라져야 함.
         self._refresh_filter_counts()
         self._apply_filters()
-        speak(
-            f"{member.user_id} 회원을 "
-            f"{LEVEL_LABELS.get(from_level, from_level)} 에서 "
-            f"{new_label} 로 변경했습니다."
+        if action_word:
+            speak(f"{member.user_id} 회원을 {action_word} 했습니다.")
+        else:
+            speak(
+                f"{member.user_id} 회원을 "
+                f"{LEVEL_LABELS.get(from_level, from_level)} 에서 "
+                f"{new_label} 로 변경했습니다."
+            )
+        return True
+
+    # ---------- 탈퇴 처리 (단건 + 일괄) ----------
+
+    def _on_withdraw(self, event=None) -> None:
+        """선택한 회원(또는 체크한 여러 회원)을 사이트 등급 '탈퇴' 로 처리.
+
+        · 체크박스로 표시된 회원이 한 명 이상이면 그 회원 전원을 한 번에 처리(일괄).
+        · 체크된 회원이 없으면 현재 강조된(↑/↓로 선택한) 회원 한 명만 처리(단건).
+        · 확인창에서 '재가입 승인 차단' 체크박스를 켜면 처리된 회원들이 모두 장기
+          미접속 탈퇴자 명단에 들어가, 같은 아이디로 재가입 신청해도 승인이 막힌다.
+        """
+        speak("탈퇴 처리 버튼")
+        if self.session is None:
+            speak("로그인 세션이 없어 탈퇴 처리를 진행할 수 없습니다.")
+            wx.MessageBox(
+                "로그인 세션이 없어 탈퇴 처리를 진행할 수 없습니다.\n"
+                "한 번 로그아웃 후 다시 로그인하면 해결됩니다.",
+                "세션 없음", wx.OK | wx.ICON_WARNING,
+            )
+            return
+
+        # 1) 처리 대상 수집 — 체크된 회원 우선, 없으면 현재 강조된 한 명.
+        checked = self._checked_members()
+        if checked:
+            members: list[Member] = list(checked)
+            mode = "bulk"
+        else:
+            idx = self.list_box.GetSelection()
+            if idx < 0 or idx >= len(self.filtered):
+                speak("탈퇴 처리할 회원을 먼저 선택하거나 스페이스로 체크해 주세요.")
+                wx.MessageBox(
+                    "목록에서 회원을 ↑/↓ 로 강조하거나 스페이스로 체크한 뒤 다시 누르세요.",
+                    "선택 필요", wx.OK | wx.ICON_INFORMATION, self,
+                )
+                return
+            members = [self.filtered[idx]]
+            mode = "single"
+
+        # 2) 본인 계정·이미 탈퇴 상태인 회원 제외.
+        admin_id = self.admin_user_id
+
+        def _is_withdrawn(m: Member) -> bool:
+            # 매핑이 어긋난 스킨에서도 안전하도록 라벨 텍스트와 정수 둘 다 확인.
+            label = (getattr(m, "level_label", "") or "").strip()
+            return "탈퇴" in label or m.level == WITHDRAW_LEVEL
+
+        skipped_self = [m for m in members if m.user_id.lower() == admin_id]
+        already = [m for m in members if m.user_id.lower() != admin_id and _is_withdrawn(m)]
+        targets = [
+            m for m in members
+            if m.user_id.lower() != admin_id and not _is_withdrawn(m)
+        ]
+
+        if not targets:
+            speak("탈퇴 처리할 회원이 없습니다.")
+            parts = []
+            if skipped_self:
+                parts.append(f"본인 계정 {len(skipped_self)}명 제외")
+            if already:
+                parts.append(f"이미 탈퇴 상태 {len(already)}명 제외")
+            tail = " · ".join(parts) if parts else "선택된 회원이 없습니다."
+            wx.MessageBox(
+                f"탈퇴 처리할 회원이 없습니다.\n({tail})",
+                "처리 불필요", wx.OK | wx.ICON_INFORMATION, self,
+            )
+            return
+
+        # 3) 확인창 — 재가입 차단 체크박스 포함.
+        wd_label = LEVEL_LABELS.get(WITHDRAW_LEVEL, "탈퇴")
+        if mode == "single":
+            m0 = targets[0]
+            nick = m0.nickname or m0.name or m0.user_id
+            cur_label = (getattr(m0, "level_label", "") or
+                         LEVEL_LABELS.get(m0.level, str(m0.level)))
+            msg = (
+                f"{m0.user_id} ({nick}) 회원을\n"
+                f"{cur_label} → {wd_label} 로 처리합니다.\n\n"
+                "이 작업은 사이트에 즉시 반영됩니다. 계속하시겠습니까?"
+            )
+            title = "탈퇴 처리 최종 확인"
+        else:
+            sample = ", ".join(m.user_id for m in targets[:5])
+            if len(targets) > 5:
+                sample += f", … 외 {len(targets) - 5}명"
+            extra_lines = []
+            if skipped_self:
+                extra_lines.append(f"(본인 계정 {len(skipped_self)}명 제외)")
+            if already:
+                extra_lines.append(f"(이미 탈퇴 상태 {len(already)}명 제외)")
+            extra = ("\n" + "\n".join(extra_lines)) if extra_lines else ""
+            msg = (
+                f"체크된 {len(targets)}명을 일괄 '{wd_label}' 처리합니다.\n"
+                f"대상: {sample}{extra}\n\n"
+                "이 작업은 사이트에 즉시 반영되며 되돌리려면 Ctrl+Z 또는 수동 처리가 필요합니다.\n"
+                "계속하시겠습니까?"
+            )
+            title = f"일괄 탈퇴 처리 최종 확인 ({len(targets)}명)"
+
+        dlg = wx.RichMessageDialog(
+            self, msg, title,
+            wx.YES_NO | wx.ICON_WARNING | wx.NO_DEFAULT,
         )
+        dlg.SetYesNoLabels("예 (탈퇴 처리)", "아니오 (취소)")
+        block_label = (
+            "이 회원의 재가입 승인을 막기 (장기미접속 탈퇴자 명단에 추가)"
+            if mode == "single"
+            else f"이 {len(targets)}명의 재가입 승인을 막기 (장기미접속 탈퇴자 명단에 추가)"
+        )
+        dlg.ShowCheckBox(block_label, checked=False)
+        speak(
+            f"{len(targets)}명 탈퇴 처리 확인창입니다. 재가입 차단 체크박스를 확인한 뒤 예를 누르세요."
+            if mode == "bulk"
+            else "탈퇴 처리 확인창입니다. 재가입 차단 체크박스를 확인한 뒤 예를 누르세요."
+        )
+        ans = dlg.ShowModal()
+        block_rejoin = dlg.IsCheckBoxChecked()
+        dlg.Destroy()
+        if ans != wx.ID_YES:
+            speak("탈퇴 처리를 취소했습니다.")
+            return
+
+        # 4) 실행 — 단건은 _apply_level_change, 일괄은 전용 핸들러.
+        if mode == "single":
+            m0 = targets[0]
+            ok = self._apply_level_change(
+                m0, WITHDRAW_LEVEL,
+                source="manual_withdraw",
+                reason="수동 탈퇴 처리" + (" + 재가입 차단" if block_rejoin else ""),
+                undo_label=f"수동 탈퇴 처리 ({m0.user_id})",
+                action_word="탈퇴 처리",
+            )
+            if not ok:
+                return
+            if block_rejoin:
+                self._add_to_blocklist([m0], note="수동 탈퇴 처리")
+            return
+
+        # 일괄 처리
+        self._apply_bulk_withdraw(targets, block_rejoin=block_rejoin)
+
+    def _apply_bulk_withdraw(self, targets: list[Member], block_rejoin: bool) -> None:
+        """체크된 여러 회원을 한 번의 POST 로 일괄 탈퇴 처리."""
+        speak(f"{len(targets)}명 탈퇴 처리 중")
+        admin = MemberAdminAdapter(self.session, dry_run=False)
+        level_map = {m.user_id: WITHDRAW_LEVEL for m in targets}
+        result = admin.bulk_apply(
+            level_map,
+            action_label=f"일괄 탈퇴 처리 ({len(targets)}명)",
+        )
+
+        def _dump_lines() -> str:
+            d = getattr(result, "debug", None) or {}
+            if not d:
+                return ""
+            return "\n\n[진단용 저장 파일]\n" + "\n".join(f"· {k}: {v}" for k, v in d.items())
+
+        if not result.success:
+            speak("일괄 탈퇴 처리에 실패했습니다.")
+            self._modal_msg(
+                f"일괄 탈퇴 처리 실패: {result.message}\n"
+                f"응답 일부: {result.response_snippet[:200]}"
+                f"{_dump_lines()}",
+                "오류", wx.ICON_ERROR,
+            )
+            return
+
+        if getattr(result, "verified", None) is None and _dump_lines():
+            speak("일괄 변경 요청은 보냈지만 사이트 반영 여부를 확인하지 못했습니다.")
+            self._modal_msg(
+                f"{result.message}\n\n웹 브라우저에서 회원 등급을 직접 확인해 주세요."
+                f"{_dump_lines()}",
+                "확인 필요", wx.ICON_WARNING,
+            )
+
+        # 모델 갱신 — 사이트가 실제로 받아들인 옵션 값/라벨을 우선 사용.
+        eff_levels = getattr(result, "effective_levels", {}) or {}
+        eff_labels = getattr(result, "effective_labels", {}) or {}
+        from_levels: dict[str, int] = {}
+        to_levels: dict[str, int] = {}
+        unmark_ids: list[str] = []
+        for m in targets:
+            from_levels[m.user_id] = m.level
+            actual_level = eff_levels.get(m.user_id, WITHDRAW_LEVEL)
+            actual_label = eff_labels.get(m.user_id) or LEVEL_LABELS.get(actual_level, "탈퇴")
+            m.level = actual_level if isinstance(actual_level, int) else WITHDRAW_LEVEL
+            m.level_label = actual_label
+            to_levels[m.user_id] = m.level
+            if m.is_admin:
+                m.is_admin = False
+                unmark_ids.append(m.user_id)
+        if unmark_ids:
+            self.admin_flags.unmark_many(unmark_ids)
+        self.changed_count += len(targets)
+
+        # Undo 스택 (한 묶음으로)
+        if self.undo_stack is not None:
+            try:
+                from core.undo_stack import UndoItem
+                self.undo_stack.push(
+                    label=f"일괄 탈퇴 처리 ({len(targets)}명)",
+                    items=[
+                        UndoItem(
+                            user_id=m.user_id,
+                            nickname=m.nickname,
+                            from_level=from_levels[m.user_id],
+                            to_level=to_levels[m.user_id],
+                        )
+                        for m in targets
+                    ],
+                )
+            except Exception:
+                pass
+
+        # 영구 이력 (배치)
+        if self.level_history is not None:
+            try:
+                self.level_history.record_batch(
+                    [
+                        {
+                            "user_id": m.user_id,
+                            "nickname": m.nickname,
+                            "from_level": from_levels[m.user_id],
+                            "to_level": to_levels[m.user_id],
+                            "reason": "검색에서 일괄 탈퇴 처리"
+                                      + (" + 재가입 차단" if block_rejoin else ""),
+                        }
+                        for m in targets
+                    ],
+                    source="manual_withdraw_bulk",
+                    actor=self.admin_user_id,
+                )
+            except Exception:
+                pass
+
+        # 작업 로그
+        if self.log_writer is not None:
+            try:
+                from core.models import AdjustmentItem
+                for m in targets:
+                    item = AdjustmentItem(
+                        member=m,
+                        action="delete",
+                        from_level=from_levels[m.user_id],
+                        to_level=to_levels[m.user_id],
+                        reason=f"수동 탈퇴 처리 일괄 (관리자 {self.admin_user_id})",
+                    )
+                    self.log_writer.write_action(item, result)
+            except Exception:
+                pass
+
+        # 재가입 차단 명단 반영
+        if block_rejoin:
+            self._add_to_blocklist(targets, note="수동 탈퇴 처리 (일괄)")
+
+        # 화면 갱신
+        self._refresh_filter_counts()
+        self._apply_filters()
+        speak(f"일괄 탈퇴 처리 완료: {len(targets)}명.")
+        self._modal_msg(
+            f"{len(targets)}명을 탈퇴 처리했습니다."
+            + (f"\n재가입 차단 명단에도 추가했습니다." if block_rejoin else ""),
+            "일괄 탈퇴 처리 완료", wx.ICON_INFORMATION,
+        )
+
+    def _add_to_blocklist(self, members: list[Member], note: str = "수동 탈퇴 처리") -> None:
+        """탈퇴 처리된 회원들을 재가입 차단 명단에 추가하고 음성/로그 기록."""
+        if self.blocklist is None:
+            speak("재가입 차단 명단 기능이 비활성화돼 있어 추가하지 못했습니다.")
+            return
+        added = 0
+        failed: list[str] = []
+        for m in members:
+            try:
+                self.blocklist.add(m.user_id, nickname=m.nickname, reason=note)
+                added += 1
+            except Exception:
+                failed.append(m.user_id)
+            if self.log_writer is not None:
+                try:
+                    self.log_writer.write_event(
+                        f"manual_withdraw_block user={m.user_id} "
+                        f"actor={self.admin_user_id}"
+                    )
+                except Exception:
+                    pass
+        if added and not failed:
+            speak(f"재가입 차단 명단에 {added}명 추가했습니다.")
+        elif added and failed:
+            speak(f"재가입 차단 명단에 {added}명 추가, {len(failed)}명 실패.")
+            wx.MessageBox(
+                f"재가입 차단 명단 추가 결과: {added}명 성공, {len(failed)}명 실패.\n"
+                f"실패: {', '.join(failed[:10])}",
+                "주의", wx.OK | wx.ICON_WARNING, self,
+            )
+        else:
+            speak("재가입 차단 명단 추가에 실패했습니다.")
+            wx.MessageBox(
+                "재가입 차단 명단에 추가하지 못했습니다.",
+                "주의", wx.OK | wx.ICON_WARNING, self,
+            )
 
     # ---------- 다중 선택 일괄 변경 (v1.0.2) ----------
 

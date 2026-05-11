@@ -9,3 +9,4 @@ python-dateutil>=2.9.0
 msoffcrypto-tool>=5.0.0
 google-api-python-client>=2.100.0
 google-auth-oauthlib>=1.0.0
+curl_cffi>=0.7.0
