@@ -15,6 +15,12 @@ build/
 dist/
 dist_*/
 
+# 릴리스 산출물 (무설치 ZIP / Inno Setup 설치 EXE) — GitHub Releases 에만 올림
+release/
+installer_out/
+*_portable.zip
+*_setup.exe
+
 # Sensitive runtime data — DO NOT COMMIT
 # - data/dumps/: 관리자 페이지 HTML 덤프 (회원 개인정보 포함)
 # - data/logs/: 작업 로그 (회원 식별 정보 포함)

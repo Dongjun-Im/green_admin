@@ -105,10 +105,23 @@ main 브랜치에서 직접 작업.
 - 픽스처는 `tempfile` 로 격리 — 사용자 `data/` 를 절대 건드리지 않음.
 - 새 기능 추가 시 같은 폴더에 `test_<name>.py` 추가.
 
-## 빌드
-- `requirements-dev.txt` 로 빌드용 의존성 설치 (pytest + pyinstaller).
-- 빌드 명령: `pyinstaller --noconfirm chorok_green_admin.spec`
-- 결과: `dist/초록등대회원관리/초록등대회원관리.exe` (전체 폴더 통째로 배포).
+## 빌드 / 릴리스
+- 빌드 의존성: `requirements-dev.txt` (pytest + pyinstaller). 런타임 의존성: `requirements.txt`
+  (wxPython, requests, bs4, lxml, cryptography, pywin32, openpyxl, dateutil, msoffcrypto-tool,
+  google-api-python-client, google-auth-oauthlib, **curl_cffi**).
+- onedir 빌드: `py -3.12 -m PyInstaller --noconfirm chorok_green_admin.spec`
+  → `dist/초록등대회원관리/초록등대회원관리.exe` (`_internal/` 폴더와 함께 통째로 배포).
+  EXE 의 버전 리소스는 `version_info.txt` 에서 읽음 — 버전업 시 `config.py:APP_VERSION` 과
+  `version_info.txt` 의 filevers/FileVersion/ProductVersion 을 함께 수정.
+- **릴리스 두 가지 형태** (greenmulti 와 동일 방식):
+  1. **무설치(포터블)** — `dist/초록등대회원관리/` 폴더를 ZIP 으로 묶은 것.
+     사용자는 압축 풀고 `초록등대회원관리.exe` 실행.
+  2. **설치 버전** — `installer.iss` 를 Inno Setup 6 의 `ISCC.exe` 로 컴파일한 `..._setup.exe`.
+     시작 메뉴·바탕화면 바로가기 생성, 제어판 프로그램 목록에 등록(제거 가능).
+  - 한 방에: `py -3.12 build_release.py` → PyInstaller 빌드 + `release/..._portable.zip` +
+    (ISCC 가 PATH 나 `C:\Program Files (x86)\Inno Setup 6\` 에 있으면) `installer_out/..._setup.exe`.
+  - `release/`, `installer_out/`, `*_portable.zip`, `*_setup.exe`, `build/`, `dist/` 는
+    `.gitignore` — 산출물은 커밋하지 않고 GitHub Releases 에만 올린다.
 
 ## green_auth 동기화 주의
 이 리포의 `green_auth/` 하위는 `\\mac\Home\Downloads\My program\green_auth`

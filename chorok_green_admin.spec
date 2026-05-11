@@ -200,6 +200,7 @@ a = Analysis(
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
+_version_file = os.path.join(app_dir, 'version_info.txt')
 exe = EXE(
     pyz,
     a.scripts,
@@ -210,6 +211,7 @@ exe = EXE(
     strip=False,
     upx=True,
     console=False,
+    version=_version_file if os.path.isfile(_version_file) else None,
 )
 
 coll = COLLECT(
