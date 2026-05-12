@@ -254,8 +254,11 @@ class NewSubscriberDialog(wx.Dialog):
                     if not wf.activation.group_error:
                         try:
                             from core.sheets_sync import push_form_status
-                            if push_form_status(c.user_id, "활성") == "updated":
-                                sheet_part = " + 시트 상태=활성"
+                            if push_form_status(
+                                c.user_id, "활성",
+                                period_from=c.period_from, period_to=c.period_to,
+                            ) == "updated":
+                                sheet_part = " + 시트 상태=활성·기간 기록"
                         except Exception:
                             pass
                     mark = "[성공]" if not wf.activation.group_error else "[일부]"

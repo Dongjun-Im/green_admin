@@ -161,3 +161,24 @@ def test_short_subscription_status():
     assert short_subscription_status([expired], today, is_applicant=True) == "만료"
     assert short_subscription_status([], today, is_applicant=True) == "결제 대기"
     assert short_subscription_status([], today, is_applicant=False) == "-"
+
+
+def test_matrix_status_label():
+    from core.payment_matrix import matrix_status_label
+    today = date(2026, 5, 1)
+    active = _sub("h", date(2026, 1, 1), date(2026, 6, 30))
+    assert matrix_status_label([active], today, is_applicant=False) == "구독중 — 2026-06-30 까지 (60일 남음)"
+    today_is_end = _sub("h", date(2026, 1, 1), date(2026, 5, 1))
+    assert matrix_status_label([today_is_end], today, is_applicant=False) == "구독중 — 2026-05-01 까지 (오늘까지)"
+    expired = _sub("h", date(2025, 1, 1), date(2025, 12, 31))
+    assert matrix_status_label([expired], today, is_applicant=False) == "구독 만료 — 2025-12-31"
+    assert matrix_status_label([], today, is_applicant=False) == "구독 안 함"
+    assert matrix_status_label([], today, is_applicant=True) == "구독 안 함 (결제 대기)"
+
+
+def test_matrix_status_label_picks_latest():
+    from core.payment_matrix import matrix_status_label
+    today = date(2026, 5, 1)
+    old = _sub("h", date(2025, 1, 1), date(2025, 12, 31), sub_id=1)
+    new = _sub("h", date(2026, 1, 1), date(2026, 7, 31), sub_id=2)
+    assert matrix_status_label([old, new], today, is_applicant=False).startswith("구독중 — 2026-07-31")

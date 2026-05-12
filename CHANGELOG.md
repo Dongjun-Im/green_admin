@@ -1,5 +1,35 @@
 # CHANGELOG
 
+## Unreleased
+
+### 추가/변경
+- 신규 가입자 승인 또는 회원 'DSM 활성화' 시, 구글 폼 응답 시트("설문지 응답 시트1")의
+  '상태'(P)뿐 아니라 같은 행의 **'시작일'(J)·'만료일'(K)** 도 자동으로 기록한다
+  (활성 구독의 `period_from`/`period_to`, ISO `YYYY-MM-DD`). 폼 시트에 해당 회원 행이
+  없으면 지금처럼 조용히 넘어간다. 비활성화는 '상태'만 바꾸고 날짜는 건드리지 않는다.
+  - `core/sheets_sync.py`: `update_form_activation()` 추가(`update_form_status` 는 위임),
+    모듈 함수 `push_form_status(...)` 에 `period_from`/`period_to` 인자 추가.
+  - `core/dsm_workflow.py`: `NewSubscriberCandidate` 에 `period_from` 필드 추가.
+- **자료실 구독비 관리 매트릭스 화면 정리** (`ui/payment_dialog.py`):
+  - 화면에서 월별 칸(25-06, 25-07 … 12개월)을 제거 — 스크린리더로 한 줄을 읽을 때
+    노이즈가 컸음. 월별 표는 TXT/Excel/HTML 내보내기에는 그대로 유지.
+  - '구독 상태' 칸을 만료일·남은 일수까지 한 줄에 명확히 표시
+    ("구독중 — 2026-06-30 까지 (5일 남음)" / "구독 만료 — 2026-03-31" / "구독 안 함")
+    — `core/payment_matrix.py:matrix_status_label()` 추가.
+  - DSM 사용자명과 소리샘 아이디가 다를 때(예: DSM `hj06` ↔ 소리샘 `rgw107`, 둘 다 '김혜정'),
+    DSM 사용자의 실명(설명 필드)으로 소리샘 회원을 찾아(그 이름의 회원이 딱 한 명일 때만)
+    행을 합치고 `rgw107 / 김혜정 / 닉네임  (DSM: hj06)` 처럼 표시. 'DSM 정합' 판정도
+    이 매칭을 반영. — `core/dsm_workflow.py:match_sorisem_member_by_name()` /
+    `resolve_dsm_username_to_sorisem()` 추가; `core/dsm_client.list_users()` 의
+    `description`(실명) 도 함께 읽어 옴.
+  - 같은 사람이 소리샘 회원 행 + DSM/신청 아이디 행으로 **중복**되어 나오던 것을 한 줄로 합침 —
+    폼 시트의 '이름'(또는 DSM 사용자 설명의 실명)으로 소리샘 회원을 찾아: 같은 이름의 행 중
+    소리샘 회원 행이 딱 하나면 → 그 행(소리샘 아이디 우선, 구독 유무 무관)을 대표로,
+    나머지 아이디는 `(DSM: …)` 로 부기. 소리샘 회원 행이 없으면 '구독중'인 행이 딱 하나일
+    때만, 동명이인(소리샘 회원 2명 이상)이면 그 중 '구독중'이 딱 하나일 때만 합친다 —
+    그 외 애매한 경우는 합치지 않고 그대로 둔다. 폼 신청자의 희망아이디가 소리샘 아이디와
+    달라도(예: 희망아이디 `books9988` ↔ 소리샘 `books`, 둘 다 '이성제') 이름으로 묶어 준다.
+
 ## v1.1.0 (2026-05-11)
 
 ### 추가

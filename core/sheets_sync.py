@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Iterable, TYPE_CHECKING
 
@@ -65,9 +65,11 @@ FORM_RESPONSE_HEADERS = [
     "시작일", "만료일", "결제안내발송", "환영메일발송",
     "만료알림발송", "비활성화처리", "상태", "메모",
 ]
-# 희망아이디(매칭 키)와 상태 컬럼 인덱스 (0-기반).
-FORM_COL_USERID = 5   # F
-FORM_COL_STATUS = 15  # P
+# 주요 컬럼 인덱스 (0-기반).
+FORM_COL_USERID = 5        # F  희망아이디 (매칭 키)
+FORM_COL_PERIOD_FROM = 9   # J  시작일
+FORM_COL_PERIOD_TO = 10    # K  만료일
+FORM_COL_STATUS = 15       # P  상태
 
 
 def _col_letter(n: int) -> str:
@@ -79,8 +81,10 @@ def _col_letter(n: int) -> str:
     return s
 
 
-FORM_LAST_COL = _col_letter(len(FORM_RESPONSE_HEADERS))   # "Q"
-FORM_STATUS_COL = _col_letter(FORM_COL_STATUS + 1)        # "P"
+FORM_LAST_COL = _col_letter(len(FORM_RESPONSE_HEADERS))           # "Q"
+FORM_STATUS_COL = _col_letter(FORM_COL_STATUS + 1)               # "P"
+FORM_PERIOD_FROM_COL = _col_letter(FORM_COL_PERIOD_FROM + 1)     # "J"
+FORM_PERIOD_TO_COL = _col_letter(FORM_COL_PERIOD_TO + 1)         # "K"
 
 # 회원관리 앱이 직접 생성한 행의 '메모' 값 — 구글 폼 제출과 구분용.
 NEW_USER_MEMO = "회원관리 앱에 의해 생성"
@@ -556,30 +560,30 @@ class SheetsSyncClient:
         ).execute()
         return title
 
-    def update_form_status(self, member_user_id: str, status: str) -> bool:
-        """폼 응답 탭에서 희망아이디(F열) 가 일치하는 행의 '상태'(P열)를 갱신.
+    def _find_form_row(self, member_user_id: str) -> tuple[str, int] | None:
+        """폼 응답 탭에서 희망아이디(F열) 가 일치하는 첫 행을 찾는다.
 
-        일치 행이 없으면 False (앱으로만 만든 DSM 사용자 등 — 폼 행 없음).
-        탭이 없으면 False. 여러 행이 같은 user_id 면 처음 발견된 행만 갱신.
+        Returns: (탭 제목, 1-기반 행 번호) — 탭이 없거나 일치 행이 없으면 None.
+        여러 행이 같은 user_id 면 처음 발견된 행만 반환.
         """
+        target = (member_user_id or "").strip().lower()
+        if not target:
+            return None
         title = self._find_form_sheet_title()
         if title is None:
-            return False
+            return None
         result = self._svc().spreadsheets().values().get(
             spreadsheetId=self.spreadsheet_id,
             range=f"{title}!A:{FORM_LAST_COL}",
         ).execute()
         rows = result.get("values", [])
         if not rows:
-            return False
+            return None
         first = rows[0]
         is_header = bool(first) and (
             (len(first) >= 1 and str(first[0]).strip() == "타임스탬프")
-            or (len(first) >= 6 and str(first[FORM_COL_USERID]).strip() == "희망아이디")
+            or (len(first) > FORM_COL_USERID and str(first[FORM_COL_USERID]).strip() == "희망아이디")
         )
-        target = (member_user_id or "").strip().lower()
-        if not target:
-            return False
         for i, r in enumerate(rows):
             if i == 0 and is_header:
                 continue
@@ -588,15 +592,51 @@ class SheetsSyncClient:
                 if len(r) > FORM_COL_USERID else ""
             )
             if uid_cell == target:
-                row_num = i + 1  # 시트는 1-기반
-                self._svc().spreadsheets().values().update(
-                    spreadsheetId=self.spreadsheet_id,
-                    range=f"{title}!{FORM_STATUS_COL}{row_num}",
-                    valueInputOption="RAW",
-                    body={"values": [[status]]},
-                ).execute()
-                return True
-        return False
+                return title, i + 1  # 시트는 1-기반
+        return None
+
+    def _set_form_cell(self, title: str, a1: str, value) -> None:
+        self._svc().spreadsheets().values().update(
+            spreadsheetId=self.spreadsheet_id,
+            range=f"{title}!{a1}",
+            valueInputOption="RAW",
+            body={"values": [[value]]},
+        ).execute()
+
+    def update_form_activation(
+        self,
+        member_user_id: str,
+        *,
+        status: str | None = None,
+        period_from: date | None = None,
+        period_to: date | None = None,
+    ) -> bool:
+        """폼 응답 탭에서 희망아이디(F열) 가 일치하는 행에 상태/시작일/만료일 기록.
+
+        주어진 값만 쓴다 — status 만 주면 '상태'(P열)만, period_from/period_to 도
+        주면 '시작일'(J열)·'만료일'(K열)도. 날짜는 ISO(YYYY-MM-DD) 로 기록.
+        일치 행이 없으면 False (앱으로만 만든 DSM 사용자 등 — 폼 행 없음).
+        탭이 없으면 False.
+        """
+        found = self._find_form_row(member_user_id)
+        if found is None:
+            return False
+        title, row_num = found
+        if status is not None:
+            self._set_form_cell(title, f"{FORM_STATUS_COL}{row_num}", status)
+        if period_from is not None:
+            self._set_form_cell(title, f"{FORM_PERIOD_FROM_COL}{row_num}", period_from.isoformat())
+        if period_to is not None:
+            self._set_form_cell(title, f"{FORM_PERIOD_TO_COL}{row_num}", period_to.isoformat())
+        return True
+
+    def update_form_status(self, member_user_id: str, status: str) -> bool:
+        """폼 응답 탭에서 희망아이디(F열) 가 일치하는 행의 '상태'(P열)를 갱신.
+
+        일치 행이 없으면 False (앱으로만 만든 DSM 사용자 등 — 폼 행 없음).
+        탭이 없으면 False. 여러 행이 같은 user_id 면 처음 발견된 행만 갱신.
+        """
+        return self.update_form_activation(member_user_id, status=status)
 
 
 # ---------- 통합 동기화 ----------
@@ -659,8 +699,17 @@ def run_full_sync(
 
 # ---------- 폼 시트 '상태' 컬럼 갱신 (DSM 활성/비활성 버튼 연동) ----------
 
-def push_form_status(member_user_id: str, status: str) -> str:
+def push_form_status(
+    member_user_id: str,
+    status: str,
+    *,
+    period_from: "date | None" = None,
+    period_to: "date | None" = None,
+) -> str:
     """폼 응답 시트의 해당 회원 행 '상태' 컬럼을 status 로 갱신 — best-effort.
+
+    period_from/period_to 를 주면 같은 행의 '시작일'(J)·'만료일'(K)도 함께 기록한다
+    (DSM 사용자 생성/활성화 시 구독 기간을 시트에 적어 두는 용도).
 
     인증 전(토큰 캐시 없음) 이면 브라우저 OAuth 가 갑자기 뜨지 않도록 조용히
     스킵한다. 시트 ID 미설정도 스킵.
@@ -679,7 +728,10 @@ def push_form_status(member_user_id: str, status: str) -> str:
         return ""
     try:
         client = SheetsSyncClient(sid)
-        return "updated" if client.update_form_status(member_user_id, status) else "not_found"
+        ok = client.update_form_activation(
+            member_user_id, status=status, period_from=period_from, period_to=period_to,
+        )
+        return "updated" if ok else "not_found"
     except GoogleAuthError as e:
         return f"error:auth:{e}"
     except Exception as e:

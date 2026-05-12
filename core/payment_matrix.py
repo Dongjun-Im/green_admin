@@ -166,3 +166,24 @@ def short_subscription_status(
     if is_applicant:
         return "결제 대기"
     return "-"
+
+
+def matrix_status_label(
+    subs: Sequence[Subscription], today: date, *, is_applicant: bool,
+) -> str:
+    """매트릭스 '구독 상태' 컬럼용 — 구독중/만료/안 함을 만료일·남은 일수까지 명확히.
+
+        활성 구독       -> '구독중 — 2026-06-30 까지 (5일 남음)'  (오늘이 만료일이면 '오늘까지')
+        만료 구독만     -> '구독 만료 — 2026-03-31'
+        구독 이력 없음  -> 폼/앱 신청자면 '구독 안 함 (결제 대기)', 아니면 '구독 안 함'
+    """
+    if subs:
+        latest = max(subs, key=lambda s: s.period_to)
+        end = latest.period_to.isoformat()
+        if latest.period_to < today:
+            return f"구독 만료 — {end}"
+        days_left = (latest.period_to - today).days
+        if days_left <= 0:
+            return f"구독중 — {end} 까지 (오늘까지)"
+        return f"구독중 — {end} 까지 ({days_left}일 남음)"
+    return "구독 안 함 (결제 대기)" if is_applicant else "구독 안 함"

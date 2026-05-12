@@ -60,6 +60,39 @@ def match_sorisem_member(
     return None
 
 
+def match_sorisem_member_by_name(
+    name: str, sorisem_members: list[Member]
+) -> Optional[Member]:
+    """소리샘 회원 중 '이름'(본명)이 정확히 일치하는 회원을 찾는다.
+
+    DSM 사용자명이 소리샘 user_id 와 다른 경우(예: DSM hj06 ↔ 소리샘 rgw107,
+    둘 다 '김혜정')에 이름으로 다리를 놓기 위한 보조 매칭. 앞뒤 공백만 정규화한
+    뒤 완전 일치로 비교하며, **그 이름을 가진 회원이 딱 한 명일 때만** 반환한다
+    (동명이인이 둘 이상이면 어느 쪽인지 알 수 없으므로 None).
+    """
+    target = (name or "").strip()
+    if not target:
+        return None
+    hits = [m for m in sorisem_members if (m.name or "").strip() == target]
+    return hits[0] if len(hits) == 1 else None
+
+
+def resolve_dsm_username_to_sorisem(
+    dsm_username: str,
+    *,
+    sorisem_members: list[Member],
+    dsm_realname: str = "",
+) -> Optional[Member]:
+    """DSM 사용자명을 소리샘 회원으로 해석 — ① user_id 일치, ② 실명 유일 일치.
+
+    둘 다 안 되면 None. 호출자는 None 이면 DSM 사용자명을 그대로 쓰면 된다.
+    """
+    m = match_sorisem_member(dsm_username, sorisem_members)
+    if m is not None:
+        return m
+    return match_sorisem_member_by_name(dsm_realname, sorisem_members)
+
+
 def activate_subscriber_with_welcome_mail(
     *,
     dsm_client: DsmClient,
@@ -221,6 +254,7 @@ class NewSubscriberCandidate:
     period_to: date         # 가장 늦은 활성 구독의 만료일
     months: int             # 그 활성 구독의 개월 수
     is_renewal: bool        # 과거에 이미 구독한 적이 있으면 True
+    period_from: date | None = None   # 그 활성 구독의 시작일 (시트 '시작일' 칸 기록용)
 
 
 def detect_new_subscribers(
@@ -295,6 +329,7 @@ def detect_new_subscribers(
             period_to=latest.period_to,
             months=latest.months,
             is_renewal=len(subs) > 1,
+            period_from=latest.period_from,
         ))
 
     # 만료일이 가까운(오늘에 가까운) 사람부터 위로 — 일정상 오늘 활성화하면 더

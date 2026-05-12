@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import sys
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 import pytest
@@ -383,6 +383,75 @@ def test_update_form_status_not_found_returns_false():
 def test_update_form_status_no_tab_returns_false():
     c = _client_with_fake(["다른탭"], get_result={"values": []})
     assert c.update_form_status("hong", "활성") is False
+
+
+# ---------- update_form_activation (상태 + 시작일/만료일) ----------
+
+_FORM_HEADER_17 = [
+    "타임스탬프", "이름", "전화번호", "이메일", "요금제", "희망아이디",
+    "비밀번호", "비밀번호확인", "동의여부", "시작일", "만료일",
+    "결제안내발송", "환영메일발송", "만료알림발송", "비활성화처리", "상태", "메모",
+]
+
+
+def test_update_form_activation_writes_status_and_dates():
+    rows = [
+        list(_FORM_HEADER_17),
+        ["2026-06-01", "홍길동", "010", "h@a", "3000=1개월", "hong", "pw", "pw", "동의함",
+         "", "", "", "", "", "", "", ""],
+    ]
+    c = _client_with_fake(["설문지 응답 시트1"], get_result={"values": rows})
+    ok = c.update_form_activation(
+        "hong", status="활성",
+        period_from=date(2026, 6, 1), period_to=date(2026, 6, 30),
+    )
+    assert ok is True
+    # hong 은 2번째 행(헤더 포함) → 시트 행 번호 2
+    updates = dict(c._service._capture.get("updates", []))  # {range: body}
+    assert updates["설문지 응답 시트1!P2"]["values"] == [["활성"]]
+    assert updates["설문지 응답 시트1!J2"]["values"] == [["2026-06-01"]]
+    assert updates["설문지 응답 시트1!K2"]["values"] == [["2026-06-30"]]
+
+
+def test_update_form_activation_dates_only_does_not_touch_status():
+    rows = [
+        list(_FORM_HEADER_17),
+        ["2026-06-01", "홍길동", "010", "h@a", "3000=1개월", "hong", "pw", "pw", "동의함",
+         "", "", "", "", "", "", "활성", ""],
+    ]
+    c = _client_with_fake(["설문지 응답 시트1"], get_result={"values": rows})
+    ok = c.update_form_activation(
+        "hong", period_from=date(2026, 7, 1), period_to=date(2026, 12, 31),
+    )
+    assert ok is True
+    ranges = [r for r, _ in c._service._capture.get("updates", [])]
+    assert "설문지 응답 시트1!J2" in ranges
+    assert "설문지 응답 시트1!K2" in ranges
+    assert all(not r.endswith("!P2") for r in ranges)  # status 안 줬으니 P 안 건드림
+
+
+def test_update_form_activation_not_found_returns_false():
+    rows = [list(_FORM_HEADER_17),
+            ["2026-06-01", "홍길동", "010", "h@a", "3000=1개월", "hong", "pw", "pw", "동의함",
+             "", "", "", "", "", "", "활성", ""]]
+    c = _client_with_fake(["설문지 응답 시트1"], get_result={"values": rows})
+    assert c.update_form_activation(
+        "ghost", status="활성", period_from=date(2026, 6, 1), period_to=date(2026, 6, 30),
+    ) is False
+    assert not c._service._capture.get("updates")
+
+
+def test_update_form_status_still_writes_only_P_column():
+    """리팩터 회귀 — update_form_status 는 여전히 상태(P) 한 칸만 쓴다 (J/K 안 건드림)."""
+    rows = [
+        list(_FORM_HEADER_17),
+        ["2026-06-01", "홍길동", "010", "h@a", "3000=1개월", "hong", "pw", "pw", "동의함",
+         "2026-06-01", "2026-06-30", "", "", "", "", "활성", ""],
+    ]
+    c = _client_with_fake(["설문지 응답 시트1"], get_result={"values": rows})
+    assert c.update_form_status("hong", "비활성") is True
+    ranges = [r for r, _ in c._service._capture.get("updates", [])]
+    assert ranges == ["설문지 응답 시트1!P2"]
 
 
 # ---------- push_form_status (module-level, 토큰 가드) ----------

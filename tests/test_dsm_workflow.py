@@ -203,6 +203,44 @@ def test_match_sorisem_member_case_insensitive():
     assert match_sorisem_member("", members) is None
 
 
+def test_match_sorisem_member_by_name_unique():
+    from core.dsm_workflow import match_sorisem_member_by_name
+    members = [
+        Member(user_id="rgw107", name="김혜정"),
+        Member(user_id="kim2", name="김철수"),
+    ]
+    assert match_sorisem_member_by_name("김혜정", members).user_id == "rgw107"
+    assert match_sorisem_member_by_name(" 김혜정 ", members).user_id == "rgw107"  # 공백 무시
+    assert match_sorisem_member_by_name("없는사람", members) is None
+    assert match_sorisem_member_by_name("", members) is None
+
+
+def test_match_sorisem_member_by_name_ambiguous_returns_none():
+    from core.dsm_workflow import match_sorisem_member_by_name
+    members = [
+        Member(user_id="kim1", name="김혜정"),
+        Member(user_id="kim2", name="김혜정"),   # 동명이인
+    ]
+    assert match_sorisem_member_by_name("김혜정", members) is None
+
+
+def test_resolve_dsm_username_to_sorisem():
+    from core.dsm_workflow import resolve_dsm_username_to_sorisem
+    members = [
+        Member(user_id="rgw107", name="김혜정", nickname="혜정닉"),
+        Member(user_id="hong", name="홍길동"),
+    ]
+    # ① user_id 일치 우선 — 실명은 무시
+    m = resolve_dsm_username_to_sorisem("hong", sorisem_members=members, dsm_realname="아무개")
+    assert m.user_id == "hong"
+    # ② user_id 안 맞으면 실명(유일)으로
+    m = resolve_dsm_username_to_sorisem("hj06", sorisem_members=members, dsm_realname="김혜정")
+    assert m.user_id == "rgw107" and m.nickname == "혜정닉"
+    # 둘 다 안 되면 None
+    assert resolve_dsm_username_to_sorisem("hj06", sorisem_members=members, dsm_realname="") is None
+    assert resolve_dsm_username_to_sorisem("zzz", sorisem_members=members, dsm_realname="모르는사람") is None
+
+
 def test_workflow_renewal_subject(monkeypatch):
     """is_renewal=True 면 연장 톤 제목."""
     client = _mock_dsm_client(exists=True)
@@ -399,6 +437,8 @@ def test_detect_new_subscribers_basic():
     assert uids == ["kim"]
     assert candidates[0].months == 1
     assert candidates[0].period_to == date(2026, 6, 30)
+    # period_from 도 활성 구독에서 채워진다 (시트 '시작일' 칸 기록용)
+    assert candidates[0].period_from == date(2026, 6, 30) - timedelta(days=30)
     assert candidates[0].is_renewal is False  # 단 하나의 구독
 
 

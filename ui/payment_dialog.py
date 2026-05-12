@@ -23,13 +23,9 @@ from core import app_options
 from core.models import Member
 from core.payment_matcher import PaymentMatcher
 from core.payment_matrix import (
-    MonthHeader,
-    cell_state,
     combined_status,
-    month_range,
+    matrix_status_label,
     payment_state_label,
-    short_subscription_status,
-    status_summary,
     subscription_period_label,
 )
 from core.payment_store import (
@@ -66,9 +62,6 @@ from ui.payment_export_dialog import (
 )
 from ui.payment_mail_dialog import PaymentMailDialog
 from ui.sheets_sync_dialog import SheetsSyncDialog
-
-
-_MATRIX_MONTHS = 12
 
 
 def _format_sheet_status_note(result: str) -> str:
@@ -110,6 +103,12 @@ class PaymentDialog(wx.Dialog):
         self._dsm_member_names: set[str] | None = None
         # DSM 사용자명(lower) → 이메일. None = 아직 조회 안 됨.
         self._dsm_emails: dict[str, str] | None = None
+        # DSM 사용자명(lower) → 실명(설명 필드). None = 아직 조회 안 됨.
+        self._dsm_descriptions: dict[str, str] | None = None
+        # 소리샘 user_id(lower) → 그 회원과 매칭된 DSM 사용자명 (아이디가 다를 때).
+        self._dsm_bridged: dict[str, str] = {}
+        # DSM 자료실 그룹 멤버를 소리샘 user_id 로 해석한 집합 (in_dsm 판정용).
+        self._dsm_resolved_lower: set[str] = set()
         self._build_ui()
         self.SetMinSize(wx.Size(900, 580))
         self.Fit()
@@ -228,24 +227,16 @@ class PaymentDialog(wx.Dialog):
 
     # ---------- 데이터 로딩 ----------
 
-    # 매트릭스 고정 컬럼 수 (월별 12개 컬럼 앞)
-    _FIXED_COLS = 6
-
     def _reload(self) -> None:
-        # 컬럼 재구성 (오늘 기준 12개월)
-        self.month_headers: list[MonthHeader] = month_range(date.today(), _MATRIX_MONTHS)
-
+        # 화면 컬럼 — 월별 칸(25-06 …)은 화면에서 빼고, 자세한 '구독 상태' 한 칸으로.
+        # (월별 표는 TXT/Excel/HTML 내보내기에는 그대로 들어간다.)
         self.matrix.ClearAll()
-        self.matrix.InsertColumn(0, "아이디 / 이름 / 닉네임", width=220)
-        self.matrix.InsertColumn(1, "구독 상태", width=130)
+        self.matrix.InsertColumn(0, "아이디 / 이름 / 닉네임", width=260)
+        self.matrix.InsertColumn(1, "구독 상태", width=220)
         self.matrix.InsertColumn(2, "구독 기간", width=170)
         self.matrix.InsertColumn(3, "DSM 이메일", width=170)
-        self.matrix.InsertColumn(4, "입금 상태", width=110)
-        self.matrix.InsertColumn(5, "DSM 정합", width=140)
-        col = self._FIXED_COLS
-        for h in self.month_headers:
-            self.matrix.InsertColumn(col, h.label, width=58)
-            col += 1
+        self.matrix.InsertColumn(4, "입금 상태", width=100)
+        self.matrix.InsertColumn(5, "DSM 정합", width=160)
 
         # 행 집합 — 결제 구독 이력 ∪ DSM 자료실 그룹 멤버 ∪ 폼 신청자.
         all_subs = self.store.all_subscriptions()
@@ -254,6 +245,12 @@ class PaymentDialog(wx.Dialog):
             subs_by_uid.setdefault(s.member_user_id, []).append(s)
 
         members_by_uid = {m.user_id: m for m in self.all_members}
+        # 소리샘 본명 → 그 이름을 가진 회원 목록 (동명이인 판정용)
+        members_by_name: dict[str, list[Member]] = {}
+        for m in self.all_members:
+            nm = (m.name or "").strip()
+            if nm:
+                members_by_name.setdefault(nm, []).append(m)
 
         # 폼 신청자 — member_user_id(희망아이디) 기준
         applicants = self.store.all_form_applicants()
@@ -268,11 +265,27 @@ class PaymentDialog(wx.Dialog):
         if self._dsm_member_names is not None:
             dsm_lower_set = {(n or "").strip().lower() for n in self._dsm_member_names if n}
         dsm_email_keys: set[str] = set((self._dsm_emails or {}).keys())
+        descriptions = self._dsm_descriptions or {}   # {dsm_username_lower: 실명}
 
-        all_uids: set[str] = set(subs_by_uid.keys())
+        # DSM 사용자명 ↔ 소리샘 회원 다리 놓기:
+        #   ① user_id 가 같은 소리샘 회원이 있으면 그 user_id
+        #   ② 없으면 DSM 설명(실명)으로 — 그 이름의 소리샘 회원이 '딱 한 명'이면 그 user_id
+        #   ③ 둘 다 아니면 DSM 사용자명 그대로
+        # _dsm_bridged: 소리샘 user_id(lower) → 그 회원과 합쳐진 다른 아이디(DSM 사용자명 등) 목록.
+        self._dsm_bridged: dict[str, list[str]] = {}
+        self._dsm_resolved_lower: set[str] = set()
+        today = date.today()
 
-        def _resolve_uid(raw: str) -> str:
-            """raw 와 lower 일치하는 회원 user_id 가 있으면 그걸로, 없으면 raw."""
+        def _bridge(target_uid: str, alias_id: str) -> None:
+            tl = target_uid.strip().lower()
+            lst = self._dsm_bridged.setdefault(tl, [])
+            if alias_id and alias_id not in lst:
+                lst.append(alias_id)
+            # 합쳐진 별칭이 DSM 자료실 그룹 멤버였다면 그 그룹 소속을 대표 회원에게 넘긴다.
+            if alias_id and alias_id.strip().lower() in dsm_lower_set:
+                self._dsm_resolved_lower.add(tl)
+
+        def _resolve_id_only(raw: str) -> str:
             key = (raw or "").strip()
             if not key:
                 return key
@@ -282,13 +295,49 @@ class PaymentDialog(wx.Dialog):
                 key,
             )
 
+        def _resolve_by_name(raw_id: str, name: str) -> str:
+            """id 가 안 맞으면 '이름'으로 — 그 이름의 소리샘 회원이 딱 한 명이면 그 user_id.
+
+            매칭되면 raw_id 를 그 회원의 별칭으로 _bridge 등록한다.
+            """
+            key = (raw_id or "").strip()
+            if not key:
+                return key
+            resolved = _resolve_id_only(key)
+            if resolved.lower() != key.lower():
+                return resolved  # ① user_id 일치
+            nm = (name or "").strip()
+            if nm:
+                cands = members_by_name.get(nm, [])
+                if len(cands) == 1:  # ② 이름 유일 일치
+                    _bridge(cands[0].user_id, key)
+                    return cands[0].user_id
+            return key  # ③ 매칭 실패 — 원래 아이디 그대로
+
+        all_uids: set[str] = set(subs_by_uid.keys())
         if self._dsm_member_names is not None:
             for dn in self._dsm_member_names:
                 if dn:
-                    all_uids.add(_resolve_uid(dn))
+                    # DSM 사용자 — 실명(설명 필드)으로 소리샘 회원 찾기
+                    ruid = _resolve_by_name(dn, descriptions.get((dn or "").strip().lower(), ""))
+                    all_uids.add(ruid)
+                    self._dsm_resolved_lower.add(ruid.strip().lower())
         for a in applicants:
             if a.member_user_id:
-                all_uids.add(_resolve_uid(a.member_user_id))
+                # 폼 신청자 — 희망아이디가 안 맞으면 폼의 '이름'으로 소리샘 회원 찾기
+                all_uids.add(_resolve_by_name(a.member_user_id, a.name))
+
+        def _realname_of(uid: str) -> str:
+            """행 정렬·중복합치기용 '이름' — 소리샘 회원이면 본명, 아니면 DSM 실명/폼 이름."""
+            uid_l = uid.strip().lower()
+            m = members_by_uid.get(uid)
+            if m is not None:
+                return (m.name or "").strip()
+            rn = (descriptions.get(uid_l) or "").strip()
+            if rn:
+                return rn
+            fa = applicants_by_uid_lower.get(uid_l)
+            return (fa.name or "").strip() if fa else ""
 
         rows: list[tuple[Member, list[Subscription]]] = []
         for uid in all_uids:
@@ -296,18 +345,68 @@ class PaymentDialog(wx.Dialog):
             m = members_by_uid.get(uid)
             if m is None:
                 # 소리샘 회원 목록엔 없는 user_id — 이름 채우기 우선순위:
-                #   ① 폼 신청자 이름  ② DSM 사용자/이메일 정보  ③ '소리샘 회원 아님'
+                #   ① 폼 신청자 이름  ② DSM 실명(설명)/이메일 정보  ③ '소리샘 회원 아님'
                 uid_l = uid.strip().lower()
                 fa = applicants_by_uid_lower.get(uid_l)
+                rn = (descriptions.get(uid_l) or "").strip()
                 if fa and (fa.name or "").strip():
                     fb_name = fa.name.strip()
                 elif uid_l in dsm_lower_set or uid_l in dsm_email_keys:
                     em = (self._dsm_emails or {}).get(uid_l, "")
-                    fb_name = f"(DSM 사용자{(' ' + em) if em else ''})"
+                    if rn:
+                        fb_name = f"(DSM 사용자 — {rn})"
+                    else:
+                        fb_name = f"(DSM 사용자{(' ' + em) if em else ''})"
                 else:
                     fb_name = "(소리샘 회원 아님)"
                 m = Member(user_id=uid, name=fb_name, nickname="")
             rows.append((m, subs))
+
+        # ----- 중복 행 합치기 -----
+        # 같은 사람(이름이 같음)으로 보이는 행이 여러 개일 때 한 줄로 합친다 — 대표는:
+        #   · 소리샘 회원 행이 그 그룹에 딱 하나면 → 그 행 (소리샘 아이디 우선, 구독 유무 무관)
+        #   · 소리샘 회원 행이 0개면 → 구독중인 행이 딱 하나일 때만 그 행
+        #   · 소리샘 회원 행이 2개 이상(동명이인)이면 → 그 중 구독중인 회원이 딱 하나일 때만
+        # 그 외(애매)는 합치지 않고 그대로 둔다. 합쳐진 나머지 아이디는 '(DSM: …)' 로 부기.
+        groups: dict[str, list[int]] = {}
+        for i, (m, _subs) in enumerate(rows):
+            nm = _realname_of(m.user_id)
+            if nm:
+                groups.setdefault(nm, []).append(i)
+        drop: set[int] = set()
+
+        def _has_active(subs) -> bool:
+            return any(s.period_to >= today for s in subs)
+
+        for nm, idxs in groups.items():
+            if len(idxs) < 2:
+                continue
+            real_idxs = [i for i in idxs if rows[i][0].user_id in members_by_uid]
+            if len(real_idxs) == 1:
+                keeper = real_idxs[0]
+            elif len(real_idxs) == 0:
+                active = [i for i in idxs if _has_active(rows[i][1])]
+                if len(active) != 1:
+                    continue
+                keeper = active[0]
+            else:  # 소리샘 동명이인 — 구독중인 회원이 딱 하나면 그걸로
+                active_real = [i for i in real_idxs if _has_active(rows[i][1])]
+                if len(active_real) != 1:
+                    continue
+                keeper = active_real[0]
+            km = rows[keeper][0]
+            # 대표 행에 구독이 없는데 같은 그룹에 구독 있는 행이 있으면 그 구독을 대표에게 넘긴다.
+            if not rows[keeper][1]:
+                donor = next((i for i in idxs if i != keeper and rows[i][1]), None)
+                if donor is not None:
+                    rows[keeper] = (km, rows[donor][1])
+            for i in idxs:
+                if i == keeper:
+                    continue
+                drop.add(i)
+                _bridge(km.user_id, rows[i][0].user_id)
+        if drop:
+            rows = [r for i, r in enumerate(rows) if i not in drop]
 
         # 정렬 — 만료일 가까운 순. 구독 이력 없는 행은 뒤로.
         def sort_key(item):
@@ -335,10 +434,14 @@ class PaymentDialog(wx.Dialog):
         pending = 0
         applicant_uids = getattr(self, "_applicant_uids_lower", set())
         if applicant_uids:
-            paid_uids = {
-                m.user_id.strip().lower()
-                for m, subs in self._matrix_rows if subs
-            }
+            paid_uids: set[str] = set()
+            for m, subs in self._matrix_rows:
+                if not subs:
+                    continue
+                ul = m.user_id.strip().lower()
+                paid_uids.add(ul)
+                for b in (self._dsm_bridged.get(ul) or []):
+                    paid_uids.add(b.strip().lower())
             pending = len(applicant_uids - paid_uids)
         kpi = (
             f"활성 구독자: {active}명   "
@@ -353,36 +456,49 @@ class PaymentDialog(wx.Dialog):
         kw = self.search_input.GetValue().strip().lower()
         self.matrix.DeleteAllItems()
         today = date.today()
-        dsm_lower: set[str] | None = None
-        if self._dsm_member_names is not None:
-            dsm_lower = {(n or "").strip().lower() for n in self._dsm_member_names if n}
+        dsm_known = self._dsm_member_names is not None
+        dsm_resolved = self._dsm_resolved_lower
+        bridged = self._dsm_bridged
         applicant_uids = getattr(self, "_applicant_uids_lower", set())
         emails = self._dsm_emails
         for member, subs in self._matrix_rows:
+            uid_lower = member.user_id.strip().lower()
+            bridged_ids = bridged.get(uid_lower) or []
             if kw and not (
                 kw in member.user_id.lower()
                 or kw in (member.name or "").lower()
                 or kw in (member.nickname or "").lower()
+                or any(kw in b.lower() for b in bridged_ids)
             ):
                 continue
-            uid_lower = member.user_id.strip().lower()
-            is_applicant = uid_lower in applicant_uids
+            is_applicant = uid_lower in applicant_uids or any(
+                b.strip().lower() in applicant_uids for b in bridged_ids
+            )
             row_label = f"{member.user_id} / {member.name}"
             if member.nickname:
                 row_label += f" / {member.nickname}"
+            if bridged_ids:
+                # DSM 사용자명/신청 아이디가 소리샘 아이디와 다른 경우 — 어느 계정인지 함께 표시.
+                row_label += f"  (DSM: {', '.join(bridged_ids)})"
             idx = self.matrix.InsertItem(self.matrix.GetItemCount(), row_label)
-            # 1: 구독 상태
+            # 1: 구독 상태 (만료일·남은 일수까지 명확히)
             self.matrix.SetItem(
                 idx, 1,
-                short_subscription_status(subs, today, is_applicant=is_applicant),
+                matrix_status_label(subs, today, is_applicant=is_applicant),
             )
             # 2: 구독 기간
             self.matrix.SetItem(idx, 2, subscription_period_label(subs, today))
-            # 3: DSM 이메일
+            # 3: DSM 이메일 — 소리샘 아이디로도, 합쳐진 DSM 사용자명으로도 찾아본다.
             if emails is None:
                 email_cell = "?"
             else:
-                email_cell = emails.get(uid_lower, "—")
+                email_cell = emails.get(uid_lower)
+                if not email_cell:
+                    for b in bridged_ids:
+                        email_cell = emails.get(b.strip().lower())
+                        if email_cell:
+                            break
+                email_cell = email_cell or "—"
             self.matrix.SetItem(idx, 3, email_cell)
             # 4: 입금 상태
             self.matrix.SetItem(
@@ -390,15 +506,10 @@ class PaymentDialog(wx.Dialog):
                 payment_state_label(has_subscription=bool(subs), is_applicant=is_applicant),
             )
             # 5: DSM·정합
-            in_dsm: bool | None = None if dsm_lower is None else (uid_lower in dsm_lower)
+            in_dsm: bool | None = (uid_lower in dsm_resolved) if dsm_known else None
             self.matrix.SetItem(
                 idx, 5, combined_status(subs, today, in_dsm_group=in_dsm),
             )
-            # 6~: 월별 셀
-            for col_offset, h in enumerate(self.month_headers):
-                self.matrix.SetItem(
-                    idx, self._FIXED_COLS + col_offset, cell_state(subs, h),
-                )
 
     # ---------- 이벤트 ----------
 
@@ -717,19 +828,33 @@ class PaymentDialog(wx.Dialog):
     def _fetch_dsm_members_in_thread(self, settings, otp: str, silent: bool) -> None:
         diag_path: Path | None = None
         emails: dict[str, str] = {}
+        descriptions: dict[str, str] = {}   # {사용자명(lower): 실명(설명 필드)}
         try:
             with DsmClient(settings.url, verify_ssl=settings.verify_ssl) as client:
                 client.login(settings.account, settings.password, otp_code=otp)
                 members = client.list_group_members(settings.group_name)
-                # 전체 사용자에서 이메일 맵 — 기본 additional 에 email 포함.
+                # 전체 사용자에서 이메일·실명 맵 — 사용자명이 소리샘 아이디와 달라도
+                # 실명으로 소리샘 회원을 찾을 수 있게 description 도 같이 모은다.
                 try:
                     for u in client.list_users():
                         nm = (u.get("name") or "").strip().lower()
+                        if not nm:
+                            continue
                         em = (u.get("email") or "").strip()
-                        if nm and em:
+                        if em:
                             emails[nm] = em
+                        desc = (u.get("description") or "").strip()
+                        if desc:
+                            descriptions[nm] = desc
                 except Exception:
                     emails = {}
+                    descriptions = {}
+                # 그룹 멤버 응답에 실명이 들어 있으면 그것도 채워 둔다 (list_users 가 안 줄 때 대비).
+                for m in members:
+                    nm = (m.get("name") or "").strip().lower()
+                    desc = (m.get("description") or "").strip()
+                    if nm and desc:
+                        descriptions.setdefault(nm, desc)
                 # 0명이면 진단 덤프를 한 번 더 (캡처 모드) 떠서 파일에 남김 —
                 # 실제 응답을 보고 어느 변종이 빈 결과인지 운영자가 점검 가능.
                 if not members and not silent:
@@ -744,7 +869,7 @@ class PaymentDialog(wx.Dialog):
             wx.CallAfter(self._fetch_dsm_failed, f"예상치 못한 오류: {e}", silent)
             return
         names = {(m.get("name") or "").strip() for m in members if m.get("name")}
-        wx.CallAfter(self._fetch_dsm_done, names, emails, silent, diag_path)
+        wx.CallAfter(self._fetch_dsm_done, names, emails, descriptions, silent, diag_path)
 
     def _write_dsm_diag(self, diag: dict) -> Path | None:
         """진단 결과를 data/dumps/dsm_group_diag_YYYYMMDD-HHMM.json 으로 저장."""
@@ -764,11 +889,13 @@ class PaymentDialog(wx.Dialog):
             return None
 
     def _fetch_dsm_done(
-        self, names: set[str], emails: dict[str, str], silent: bool,
+        self, names: set[str], emails: dict[str, str],
+        descriptions: dict[str, str], silent: bool,
         diag_path: Path | None = None,
     ) -> None:
         self._dsm_member_names = names
         self._dsm_emails = emails if emails else {}
+        self._dsm_descriptions = descriptions if descriptions else {}
         self.dsm_fetch_btn.Enable()
         self._reload()
         if silent:
@@ -943,12 +1070,14 @@ class PaymentDialog(wx.Dialog):
     ) -> None:
         # 작업 후 _dsm_member_names 캐시에 적용할 동작: ("add"|"discard", user_id) | None
         cache_op: tuple[str, str] | None = None
+        # 활성화 시 구독 시작일/만료일 — 폼 시트 'J:K' 칸 기록용 (구독 없으면 None)
+        period_from = None
+        period_to = None
         try:
             with DsmClient(settings.url, verify_ssl=settings.verify_ssl) as client:
                 client.login(settings.account, settings.password, otp_code=otp)
                 if action == "activate":
-                    # 활성 구독에서 만료일·개월 추출 — 메일 본문에 사용.
-                    period_to = None
+                    # 활성 구독에서 시작일·만료일·개월 추출 — 메일 본문 + 시트 기록.
                     months = 0
                     is_renewal = False
                     subs = self.store.subscriptions_for_member(member.user_id)
@@ -956,6 +1085,7 @@ class PaymentDialog(wx.Dialog):
                         active = [s for s in subs if s.period_to >= date.today()]
                         if active:
                             latest = max(active, key=lambda s: s.period_to)
+                            period_from = latest.period_from
                             period_to = latest.period_to
                             months = latest.months
                         is_renewal = len(subs) > 1
@@ -1053,11 +1183,17 @@ class PaymentDialog(wx.Dialog):
             return
 
         # 구글시트 폼 응답 시트의 '상태' 컬럼 갱신 (best-effort, 인증 전이면 스킵)
+        # 활성화면 같은 행의 '시작일/만료일' 도 함께 기록.
         # 단, purge_local 로 매트릭스에서 완전히 제거하는 경우엔 시트 상태도 굳이 안 건드림.
         if not (action == "delete" and purge_local):
-            msg += _format_sheet_status_note(
-                push_form_status(member.user_id, "활성" if action == "activate" else "비활성")
-            )
+            if action == "activate":
+                sheet_code = push_form_status(
+                    member.user_id, "활성",
+                    period_from=period_from, period_to=period_to,
+                )
+            else:
+                sheet_code = push_form_status(member.user_id, "비활성")
+            msg += _format_sheet_status_note(sheet_code)
         wx.CallAfter(self._member_action_done, msg, cache_op)
 
     def _member_action_done(self, msg: str, cache_op=None) -> None:
