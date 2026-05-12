@@ -1,6 +1,8 @@
-"""초록등대 회원관리 — 릴리스 빌드 스크립트.
+r"""초록등대 회원관리 — 릴리스 빌드 스크립트.
 
 하는 일:
+  0) data\google_credentials.json 이 없으면 리포 밖 마스터 사본에서 자동 복사
+     (spec 이 이 파일을 EXE 에 번들 → 사용자는 재다운로드 불필요).
   1) PyInstaller 로 onedir 빌드 (chorok_green_admin.spec)        → dist\초록등대회원관리\
   2) 무설치(포터블) ZIP 생성                                     → release\초록등대회원관리_v{ver}_portable.zip
   3) Inno Setup(ISCC.exe) 이 있으면 설치 EXE 생성               → installer_out\초록등대회원관리_v{ver}_setup.exe
@@ -8,7 +10,13 @@
 사용:  py -3.12 build_release.py            (전부 실행)
        py -3.12 build_release.py --no-build (이미 dist 가 있으면 PyInstaller 건너뜀)
 
+OAuth 자격증명(구글시트 동기화용) 마스터 사본 위치 — 둘 중 하나에 두면 매 빌드 자동 포함:
+  · 환경변수 GREEN_ADMIN_GOOGLE_CREDENTIALS 가 가리키는 파일
+  · %USERPROFILE%\.green_admin\google_credentials.json   (다른 PC 면 그 PC 의 홈 폴더 기준)
+파일 내용은 PC 와 무관 — 같은 파일을 각 작업 PC 의 홈 폴더 .green_admin\ 에 두기만 하면 된다.
+
 git: release\, installer_out\, dist\, build\ 는 .gitignore 에 등록 — 산출물은 커밋하지 않음.
+     data\google_credentials.json 도 .gitignore — 그래서 리포 밖 마스터 사본에서 끌어온다.
 """
 from __future__ import annotations
 
@@ -30,6 +38,48 @@ ROOT = Path(__file__).resolve().parent
 APP_NAME = "초록등대회원관리"
 DIST_APP = ROOT / "dist" / APP_NAME
 SPEC = ROOT / "chorok_green_admin.spec"
+
+
+GOOGLE_CRED_NAME = "google_credentials.json"
+
+
+def _ensure_google_credentials() -> None:
+    """data\\google_credentials.json 이 없으면 리포 밖 마스터 사본에서 복사해 온다.
+
+    chorok_green_admin.spec 이 빌드 시점에 이 파일이 있으면 EXE 안에 번들하고,
+    실행 시 core.sheets_sync._ensure_credentials_file 이 자동 복원하므로,
+    사용자는 한 번만 받아 두면 이후 재다운로드가 필요 없다. 단 이 파일은
+    .gitignore 라 리포를 새로 클론하면 따라오지 않으므로, 리포 밖 고정 위치에
+    마스터 사본을 두고 빌드 때마다 끌어온다.
+
+    찾는 순서:
+      1) 환경변수 GREEN_ADMIN_GOOGLE_CREDENTIALS 가 가리키는 파일
+      2) ~/.green_admin/google_credentials.json   (= %USERPROFILE%\\.green_admin\\)
+    (둘 다 없으면 경고만 — 빌드는 계속, 구글시트 동기화만 사용자가 직접 넣어야 함)
+    """
+    dest = ROOT / "data" / GOOGLE_CRED_NAME
+    if dest.is_file():
+        print(f"[0/3] OAuth 자격증명 OK — {dest}")
+        return
+    candidates: list[Path] = []
+    env_path = os.environ.get("GREEN_ADMIN_GOOGLE_CREDENTIALS")
+    if env_path:
+        candidates.append(Path(env_path).expanduser())
+    candidates.append(Path.home() / ".green_admin" / GOOGLE_CRED_NAME)
+    for src in candidates:
+        try:
+            if src.is_file():
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, dest)
+                print(f"[0/3] OAuth 자격증명 복사: {src}  →  {dest}")
+                return
+        except OSError as e:
+            print(f"      ! {src} 복사 실패: {e}")
+    print("[0/3] OAuth 자격증명(google_credentials.json) 마스터 사본을 못 찾았습니다 — "
+          "이 빌드에는 구글시트 동기화용 OAuth 클라이언트가 포함되지 않습니다.")
+    print("      아래 위치 중 하나에 한 번만 두면 다음 빌드부터 자동 포함됩니다:")
+    print(f"        {Path.home() / '.green_admin' / GOOGLE_CRED_NAME}")
+    print("        또는 환경변수 GREEN_ADMIN_GOOGLE_CREDENTIALS 에 파일 경로 지정")
 
 
 def _app_version() -> str:
@@ -100,6 +150,7 @@ def _make_installer(version: str) -> Path | None:
 def main(argv: list[str]) -> None:
     version = _app_version()
     print(f"=== 초록등대 회원관리 v{version} 릴리스 빌드 ===")
+    _ensure_google_credentials()  # spec 이 읽기 전에 data\ 에 채워 둔다
     if "--no-build" not in argv:
         _run_pyinstaller()
     elif not DIST_APP.is_dir():
