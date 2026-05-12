@@ -6,6 +6,8 @@ r"""초록등대 회원관리 — 릴리스 빌드 스크립트.
   1) PyInstaller 로 onedir 빌드 (chorok_green_admin.spec)        → dist\초록등대회원관리\
   2) 무설치(포터블) ZIP 생성                                     → release\초록등대회원관리_v{ver}_portable.zip
   3) Inno Setup(ISCC.exe) 이 있으면 설치 EXE 생성               → installer_out\초록등대회원관리_v{ver}_setup.exe
+  4) GitHub Releases 업로드용 ASCII 이름 사본 생성              → release\green_admin_v{ver}_portable.zip / _setup.exe
+     (GitHub 릴리스 자산은 한글 파일명을 떼어내서 "_v{ver}_..." 가 되므로 ASCII 사본을 미리 만든다)
 
 사용:  py -3.12 build_release.py            (전부 실행)
        py -3.12 build_release.py --no-build (이미 dist 가 있으면 PyInstaller 건너뜀)
@@ -36,6 +38,8 @@ except Exception:
 
 ROOT = Path(__file__).resolve().parent
 APP_NAME = "초록등대회원관리"
+# GitHub Releases 자산용 ASCII 접두사 (한글 파일명은 업로드 시 깨지므로 사본을 이 이름으로).
+ASCII_NAME = "green_admin"
 DIST_APP = ROOT / "dist" / APP_NAME
 SPEC = ROOT / "chorok_green_admin.spec"
 
@@ -147,6 +151,33 @@ def _make_installer(version: str) -> Path | None:
     return None
 
 
+def _make_ascii_aliases(version: str, zip_path: Path, setup_path: Path | None) -> list[Path]:
+    """GitHub Releases 업로드용 ASCII 이름 사본을 release\\ 에 만든다.
+
+    GitHub 릴리스 자산은 한글 파일명을 떼어내 "_v{ver}_portable.zip" 처럼 만들어
+    버리므로, 미리 ASCII 이름(green_admin_v{ver}_...)으로 복사해 둔다. 원본
+    한글 파일은 그대로 두므로 직접 배포·전달용으로도 계속 쓸 수 있다.
+    """
+    print("[4/4] GitHub Releases 용 ASCII 이름 사본 생성 ...")
+    out_dir = ROOT / "release"
+    out_dir.mkdir(exist_ok=True)
+    made: list[Path] = []
+    pairs = [(zip_path, f"{ASCII_NAME}_v{version}_portable.zip")]
+    if setup_path is not None:
+        pairs.append((setup_path, f"{ASCII_NAME}_v{version}_setup.exe"))
+    for src, name in pairs:
+        dst = out_dir / name
+        try:
+            if dst.exists():
+                dst.unlink()
+            shutil.copy2(src, dst)
+            print(f"      → {dst}  ({dst.stat().st_size / (1024*1024):.1f} MB)")
+            made.append(dst)
+        except OSError as e:
+            print(f"      ! {dst} 생성 실패: {e}")
+    return made
+
+
 def main(argv: list[str]) -> None:
     version = _app_version()
     print(f"=== 초록등대 회원관리 v{version} 릴리스 빌드 ===")
@@ -157,11 +188,16 @@ def main(argv: list[str]) -> None:
         raise SystemExit("--no-build 인데 dist 폴더가 없습니다. 먼저 빌드하세요.")
     zip_path = _make_portable_zip(version)
     setup_path = _make_installer(version)
+    ascii_paths = _make_ascii_aliases(version, zip_path, setup_path)
     print()
     print("=== 완료 ===")
     print(f"  무설치(포터블): {zip_path}")
     print(f"  설치 버전     : {setup_path if setup_path else '(생략 - Inno Setup 미설치)'}")
-    print("  → GitHub Releases 에 위 파일들을 첨부하세요.")
+    print(f"  GitHub 업로드용(ASCII): {', '.join(str(p) for p in ascii_paths) if ascii_paths else '(없음)'}")
+    print("  → GitHub Releases 에는 위 'GitHub 업로드용(ASCII)' 파일을 첨부하세요 "
+          "(한글 이름 파일은 업로드 시 이름이 깨집니다).")
+    print(f"    예:  gh release create v{version} --title \"초록등대 회원관리 v{version}\" "
+          + " ".join(f'"{p}"' for p in ascii_paths))
 
 
 if __name__ == "__main__":
