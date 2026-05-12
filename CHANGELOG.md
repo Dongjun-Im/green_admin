@@ -1,8 +1,14 @@
 # CHANGELOG
 
-## Unreleased
+## v1.1.1 (2026-05-12)
 
 ### 추가/변경
+- 빌드 시 `release/green_admin_v{ver}_portable.zip` / `..._setup.exe` ASCII 이름 사본을
+  자동 생성 — GitHub Releases 자산이 한글 파일명을 떼어내 깨지는 문제 회피 (`build_release.py` 4단계).
+- 사용 설명서(Shift+F1) 보강, 단축키 안내(Ctrl+K) 를 단축키 목록만으로 정리.
+- 빌드 0단계로 `data/google_credentials.json` 이 없으면 리포 밖 마스터 사본
+  (`%USERPROFILE%\.green_admin\google_credentials.json` 또는 환경변수
+  `GREEN_ADMIN_GOOGLE_CREDENTIALS`)에서 자동 복사 — 재클론 후에도 빌드만 하면 EXE 에 포함.
 - 신규 가입자 승인 또는 회원 'DSM 활성화' 시, 구글 폼 응답 시트("설문지 응답 시트1")의
   '상태'(P)뿐 아니라 같은 행의 **'시작일'(J)·'만료일'(K)** 도 자동으로 기록한다
   (활성 구독의 `period_from`/`period_to`, ISO `YYYY-MM-DD`). 폼 시트에 해당 회원 행이
