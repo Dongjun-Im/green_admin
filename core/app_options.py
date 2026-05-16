@@ -28,6 +28,7 @@ DEFAULTS: dict[str, Any] = {
     "auto_run_adjustment": False,            # 기본: 사용자가 직접 실행
     "auto_fetch_dsm_on_open": False,         # 기본: 메인 열 때 DSM 자동 가져오기 안 함
     "other_amount_subscription_months": 0,   # 0 = 단가표 외 입금은 '기타' (구독 인정 안 함)
+    "auto_fetch_nas_log_on_start": True,     # 시작 시 NAS 접속 로그 백그라운드 수집 (2FA 활성 시 자동 스킵)
 }
 
 
@@ -40,11 +41,14 @@ def _load_raw() -> dict[str, Any]:
         return {}
 
 
-def get(key: str) -> Any:
+def get(key: str, default: Any = None) -> Any:
+    """옵션 조회 — 저장 파일 → DEFAULTS → 호출자 default 순서로 폴백."""
     raw = _load_raw()
     if key in raw:
         return raw[key]
-    return DEFAULTS.get(key)
+    if key in DEFAULTS:
+        return DEFAULTS[key]
+    return default
 
 
 def set_value(key: str, value: Any) -> None:

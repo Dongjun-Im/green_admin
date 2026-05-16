@@ -4,8 +4,10 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import tempfile
 import threading
 from datetime import date
+from pathlib import Path
 
 import requests
 import wx
@@ -41,7 +43,7 @@ from core.mail_sender import (
 from core.member_admin import MemberAdminAdapter
 from core.member_parser import EmptyParseError, MemberListParser
 from core.site_diagnostics import diagnose_admin_member_html
-from core.update_check import check_for_updates
+from core.update_check import check_for_updates, download_release_asset
 from core.models import AdjustmentPlan, AdjustmentReport, BackupResult
 from core.mvp_service import MvpReport, MvpService, write_mvp_report
 from core.pending_members import PendingSeenStore, find_pending
@@ -61,6 +63,7 @@ from ui.log_viewer_dialog import LogViewerDialog
 from ui.mail_dialog import ManualMailDialog
 from ui.mvp_dialog import MvpDialog
 from ui.board_dialog import BoardAdminDialog
+from ui.nas_log_dialog import NasLogDialog
 from ui.payment_dialog import PaymentDialog
 from ui.pending_member_dialog import PendingMemberDialog
 from ui.progress_dialog import ProgressTaskDialog
@@ -101,6 +104,7 @@ ID_CHECK_UPDATE = wx.NewIdRef()
 ID_PAYMENTS = wx.NewIdRef()
 ID_TOGGLE_AUTO_ADJUST = wx.NewIdRef()
 ID_BOARD_ADMIN = wx.NewIdRef()
+ID_NAS_LOG = wx.NewIdRef()
 
 
 class MainFrame(wx.Frame):
@@ -197,6 +201,7 @@ class MainFrame(wx.Frame):
             "수동 메일 발송 (rtgreen 전용)(&M)\tCtrl+M",
         )
         task_menu.Append(ID_PAYMENTS, "자료실 구독비 관리(&P)...\tCtrl+P")
+        task_menu.Append(ID_NAS_LOG, "자료실 접속 로그(&L)...")
         task_menu.Append(ID_BOARD_ADMIN, "게시판 관리 / 공지 작성(&W)...")
         task_menu.AppendSeparator()
         task_menu.Append(ID_UNDO_LAST, "마지막 작업 되돌리기(&Z)\tCtrl+Z")
@@ -251,6 +256,7 @@ class MainFrame(wx.Frame):
         self.Bind(wx.EVT_MENU, self.on_site_diagnose, id=ID_SITE_DIAGNOSE)
         self.Bind(wx.EVT_MENU, self.on_check_update, id=ID_CHECK_UPDATE)
         self.Bind(wx.EVT_MENU, self.on_payments, id=ID_PAYMENTS)
+        self.Bind(wx.EVT_MENU, self.on_nas_log, id=ID_NAS_LOG)
         self.Bind(wx.EVT_MENU, self.on_board_admin, id=ID_BOARD_ADMIN)
         self.Bind(wx.EVT_MENU, self.on_toggle_auto_adjust, id=ID_TOGGLE_AUTO_ADJUST)
         self.Bind(wx.EVT_MENU, self._on_close, id=wx.ID_EXIT)
@@ -1090,6 +1096,13 @@ class MainFrame(wx.Frame):
         dlg.ShowModal()
         dlg.Destroy()
 
+    def on_nas_log(self, event=None) -> None:
+        """자료실(NAS) 접속 로그 — DSM Log Center 의 파일 전송 + 로그인 로그를
+        회원·시간·동작 기준으로 조회·내보내기."""
+        dlg = NasLogDialog(self, members=self._cached_members or [])
+        dlg.ShowModal()
+        dlg.Destroy()
+
     def on_board_admin(self, event=None) -> None:
         """게시판 관리 / 공지 작성 — 소리샘 게시판 설정 폼 + 단일/일괄 공지."""
         dlg = BoardAdminDialog(
@@ -1145,25 +1158,157 @@ class MainFrame(wx.Frame):
 
     def _show_update_info(self, info) -> None:
         speak(info.speak_summary())
-        body = (
-            f"새 버전 {info.latest} 가 사용 가능합니다.\n"
-            f"현재 버전: {info.current}\n\n"
-            f"{info.name}\n\n"
-            f"{info.body}\n\n"
-            f"릴리스 페이지를 지금 여시겠습니까?\n{info.release_url}"
-        )
+        body_lines = [
+            f"새 버전 {info.latest} 가 사용 가능합니다.",
+            f"현재 버전: {info.current}",
+            "",
+        ]
+        if info.name:
+            body_lines.append(info.name)
+            body_lines.append("")
+        if info.body:
+            body_lines.append(info.body)
+            body_lines.append("")
+
+        has_asset = bool(info.download_url)
+        if has_asset:
+            kind = "설치관리자" if info.is_installer else "포터블 ZIP"
+            body_lines.append(
+                f"바로 받기를 누르면 {kind}({info.asset_name}) 을 자동으로 받습니다."
+            )
+            body_lines.append("어떻게 하시겠습니까?")
+            body = "\n".join(body_lines)
+            dlg = wx.MessageDialog(
+                self, body, "새 버전 알림",
+                wx.YES_NO | wx.CANCEL | wx.ICON_INFORMATION,
+            )
+            try:
+                dlg.SetYesNoCancelLabels(
+                    "지금 받기(&D)", "릴리스 페이지(&O)", "닫기(&C)",
+                )
+            except Exception:
+                # 이 wx 버전에서 라벨 변경이 막혀 있어도 동작 자체엔 영향 없음.
+                pass
+            ans = dlg.ShowModal()
+            dlg.Destroy()
+            if ans == wx.ID_YES:
+                self.on_install_update(info)
+                return
+            if ans == wx.ID_NO:
+                self._open_release_page(info.release_url)
+            return
+
+        # 자산이 없으면 기존 흐름 — 릴리스 페이지 열기 / 닫기.
+        body_lines.append(f"릴리스 페이지를 지금 여시겠습니까?\n{info.release_url}")
+        body = "\n".join(body_lines)
         ans = wx.MessageBox(
             body, "새 버전 알림",
             wx.YES_NO | wx.ICON_INFORMATION,
         )
         if ans == wx.YES and info.release_url:
+            self._open_release_page(info.release_url)
+
+    def _open_release_page(self, url: str) -> None:
+        if not url:
+            return
+        try:
+            if sys.platform == "win32":
+                os.startfile(url)  # noqa: SIM115
+            else:
+                subprocess.Popen(["xdg-open", url])
+        except Exception:
+            pass
+
+    def on_install_update(self, info) -> None:
+        """릴리스 자산을 받아 (가능하면) 설치관리자를 실행한다."""
+        if not info.download_url or not info.asset_name:
+            wx.MessageBox(
+                "이번 릴리스에는 직접 받을 수 있는 파일이 없습니다.\n"
+                "릴리스 페이지에서 직접 받아 주세요.",
+                "업데이트", wx.OK | wx.ICON_INFORMATION,
+            )
+            self._open_release_page(info.release_url)
+            return
+
+        dest = Path(tempfile.gettempdir()) / info.asset_name
+        # 이전 .part 잔존물 정리는 download_release_asset 내부에서 함.
+
+        def worker(progress_cb):
+            return download_release_asset(
+                info.download_url,
+                dest,
+                progress_cb=progress_cb,
+                fallback_total=info.asset_size,
+            )
+
+        dlg = ProgressTaskDialog(
+            self,
+            title=f"새 버전 {info.latest} 받는 중",
+            task=worker,
+            message="설치관리자를 받고 있습니다..." if info.is_installer
+                    else "포터블 ZIP 을 받고 있습니다...",
+            can_cancel=False,
+        )
+        try:
+            dlg.run_modal()
+            err = dlg.error
+            downloaded = dlg.result
+        finally:
+            dlg.Destroy()
+
+        if err is not None:
+            wx.MessageBox(
+                f"다운로드에 실패했습니다.\n{err}",
+                "업데이트", wx.OK | wx.ICON_ERROR,
+            )
+            return
+        if downloaded is None:
+            return
+
+        downloaded = Path(downloaded)
+        if info.is_installer:
+            prompt = (
+                "받기가 끝났습니다.\n"
+                f"파일: {downloaded.name}\n\n"
+                "지금 설치하고 프로그램을 재시작하시겠습니까?\n"
+                "(나중에 누르시면 받은 파일 경로만 알려 드리고 프로그램은 그대로 둡니다.)"
+            )
+            ans = wx.MessageBox(
+                prompt, "설치", wx.YES_NO | wx.ICON_QUESTION,
+            )
+            if ans == wx.YES:
+                try:
+                    if sys.platform == "win32":
+                        os.startfile(str(downloaded))  # noqa: SIM115
+                    else:
+                        subprocess.Popen([str(downloaded)])
+                except Exception as e:
+                    wx.MessageBox(
+                        f"설치관리자 실행에 실패했습니다.\n{e}\n경로: {downloaded}",
+                        "업데이트", wx.OK | wx.ICON_ERROR,
+                    )
+                    return
+                # 설치관리자가 본 EXE 를 덮어쓰려면 본 앱이 종료돼 있어야 한다.
+                # 약간 늦춰 종료해서 setup.exe 가 충분히 떠 있도록.
+                wx.CallLater(500, self.Close)
+            else:
+                wx.MessageBox(
+                    f"받은 파일: {downloaded}\n원하실 때 직접 실행해 주세요.",
+                    "업데이트", wx.OK | wx.ICON_INFORMATION,
+                )
+        else:
+            # 포터블 ZIP — 자동 설치 안 함, 폴더만 열어 줌.
             try:
                 if sys.platform == "win32":
-                    os.startfile(info.release_url)  # noqa: SIM115
-                else:
-                    subprocess.Popen(["xdg-open", info.release_url])
+                    os.startfile(str(downloaded.parent))  # noqa: SIM115
             except Exception:
                 pass
+            wx.MessageBox(
+                "포터블 ZIP 을 받았습니다.\n"
+                f"경로: {downloaded}\n\n"
+                "압축을 풀고 그 안의 초록등대회원관리.exe 를 실행해 주세요.",
+                "업데이트", wx.OK | wx.ICON_INFORMATION,
+            )
 
     # ---------- 사이트 구조 진단 (v1.0) ----------
 
@@ -1638,6 +1783,7 @@ class MainFrame(wx.Frame):
             "manual":         int(ID_MANUAL),
             "promotion_imminent": int(ID_PROMOTION_IMMINENT),
             "html_report":    int(ID_HTML_REPORT),
+            "nas_log":        int(ID_NAS_LOG),
         }
         try:
             entries = build_accelerator_entries(bindings, action_to_id)
@@ -1712,6 +1858,8 @@ class MainFrame(wx.Frame):
     def run_scheduled_tasks_if_due(self) -> None:
         # v1.0: 업데이트 확인은 항상 백그라운드로
         self.check_update_in_background()
+        # v1.2: NAS 접속 로그도 시작 시 한 번 백그라운드 수집 (silent — 실패해도 다이얼로그 X)
+        self._maybe_fetch_nas_log_in_bg()
 
         backup_due = self.tracker.is_backup_due()
         adjust_due = self.tracker.is_adjustment_due()
@@ -1787,6 +1935,71 @@ class MainFrame(wx.Frame):
                 wx.CallAfter(self.SetStatusText, "준비됨", 0)
         t = threading.Thread(target=worker, name=label, daemon=True)
         t.start()
+
+    # ---------- NAS 접속 로그 — 시작 시 백그라운드 수집 ----------
+
+    def _maybe_fetch_nas_log_in_bg(self) -> None:
+        """앱 시작 시 한 번 DSM 에서 새 로그를 받아와 SQLite 에 저장.
+
+        조건이 안 맞으면(설정 없음 / 옵션 꺼짐 / 2FA 활성 / 사용자 미설정 등)
+        조용히 건너뛴다. 어떤 예외도 대화상자로 띄우지 않음 — 사용자가 다이얼로그
+        를 열면 그때 상태 줄과 store.last_status() 에 사유가 나타난다.
+        """
+        try:
+            from core import app_options as _opts
+            if not bool(_opts.get("auto_fetch_nas_log_on_start", True)):
+                return
+        except Exception:
+            return  # 옵션 모듈 자체에 문제가 있으면 스킵
+
+        try:
+            from core.dsm_config import load_dsm_settings
+            from core.nas_log_store import NasLogStore
+            settings = load_dsm_settings()
+        except Exception:
+            return
+        if settings is None or not settings.is_complete:
+            try:
+                NasLogStore().set_last_status(False, "DSM 설정이 없습니다")
+            except Exception:
+                pass
+            return
+        if settings.use_2fa:
+            # 시작 시 OTP 다이얼로그가 떠 버리면 스크린리더 사용자가 매우 혼란.
+            # 자동 수집은 건너뛰고, 사용자가 다이얼로그를 열어 직접 새로고침하게 둔다.
+            try:
+                NasLogStore().set_last_status(
+                    False, "2단계 인증이 활성화되어 자동 수집을 건너뜁니다 — '지금 새로고침'을 눌러 주세요",
+                )
+            except Exception:
+                pass
+            return
+
+        threading.Thread(
+            target=self._fetch_nas_log_silent, args=(settings,),
+            name="nas_log_bg_fetch", daemon=True,
+        ).start()
+
+    def _fetch_nas_log_silent(self, settings) -> None:
+        # 절대로 UI 다이얼로그를 띄우지 않는다 — 실패는 store.set_last_status 에만 남김.
+        try:
+            from core.dsm_client import DsmAuthError, DsmClient
+            from core.nas_log_service import fetch_and_store_logs
+            from core.nas_log_store import NasLogStore
+            from config import DUMPS_DIR
+            store = NasLogStore()
+            with DsmClient(settings.url, verify_ssl=settings.verify_ssl) as client:
+                client.login(settings.account, settings.password)
+                fetch_and_store_logs(
+                    client, store,
+                    dsm_group_name=settings.group_name or None,
+                    dump_dir=str(DUMPS_DIR),
+                )
+        except Exception as e:  # noqa: BLE001 — 어떤 예외도 조용히
+            try:
+                NasLogStore().set_last_status(False, f"자동 수집 실패: {e}")
+            except Exception:
+                pass
 
     def _page_progress_cb(self, current: int, total: int) -> None:
         if current % 5 == 0:

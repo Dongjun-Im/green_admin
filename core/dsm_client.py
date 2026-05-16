@@ -487,6 +487,10 @@ class DsmClient:
     # 105 (권한 부족) 같은 의미 있는 오류는 폴백 안 함 — 그대로 전파.
     _GROUP_MEMBER_FALLBACK_CODES = {102, 103, 104, 3201}
 
+    # Log Center API 의 빌드 차이를 흡수할 때 다음 변종으로 넘어갈 코드들.
+    # 400(잘못된 파라미터) 도 추가 — 일부 빌드가 logtype 값을 다르게 받음.
+    _LOG_API_FALLBACK_CODES = frozenset({102, 103, 104, 400, 3201})
+
     def add_user_to_group(self, user_name: str, group_name: str) -> dict[str, Any]:
         """사용자를 그룹에 추가 — DSM 빌드 차이를 흡수한 다중 변종 시도.
 
@@ -751,6 +755,120 @@ class DsmClient:
             "attempts": attempts,
         }
 
+    # ---------- 자료실(NAS) 접속 로그 ----------
+
+    def list_audit_logs(
+        self,
+        logtype: str,
+        *,
+        start_epoch: int | None = None,
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        """DSM Log Center 의 로그를 가져온다 — 빌드별 API 차이를 다중 변종으로 흡수.
+
+        Args:
+            logtype: 'file_transfer' 또는 'connection' (그 외 값은 그대로 전달).
+            start_epoch: 이 epoch 이후 로그만(증분 수집). None 이면 전체.
+            limit: 한 번에 가져올 최대 항목 수.
+
+        Returns:
+            DSM 가 돌려 준 항목 dict 의 리스트. 정규화는 nas_log_service 가 담당.
+        """
+        base_params: dict[str, Any] = {
+            "logtype": str(logtype or "").strip(),
+            "start": 0,
+            "limit": int(limit),
+        }
+        if start_epoch:
+            # 빌드마다 키 이름이 다른 것에 대비해 두 가지를 함께 보낸다 — 모르는 키는 무시됨.
+            base_params["from"] = int(start_epoch)
+            base_params["start_date"] = int(start_epoch)
+
+        # (api, method, version, http_method, extra_params).
+        # SYNO.LogCenter.Log 는 '로그 센터' 패키지가 들어 있을 때만 응답한다 — 패키지가
+        # 저장하는 DB(WebDAV/SMB/File Station 등)는 SyslogClient.Log 에는 보통 안 잡혀
+        # 빈 응답이 오므로, 빈 응답이어도 다음 변종을 계속 시도해야 한다.
+        attempts: list[tuple[str, str, str, str, dict[str, Any]]] = [
+            ("SYNO.LogCenter.Log",         "list", "1", "GET", {}),
+            ("SYNO.LogCenter.Log",         "list", "2", "GET", {}),
+            ("SYNO.Core.SyslogClient.Log", "list", "1", "GET", {}),
+            ("SYNO.Core.SyslogClient.Log", "list", "2", "GET", {}),
+            ("SYNO.Core.SyslogClient.Status.Log", "list", "1", "GET", {}),
+        ]
+        last_err: DsmAuthError | None = None
+        empty_seen = False
+        for api, method, ver, http, extra in attempts:
+            params = dict(base_params)
+            params.update(extra)
+            try:
+                data = self._call(api, method, version=ver, params=params, http_method=http)
+            except DsmAuthError as e:
+                if e.code is not None and e.code not in self._LOG_API_FALLBACK_CODES:
+                    raise  # 권한·인증 등 의미 있는 오류는 그대로 전파
+                last_err = e
+                continue
+            items = _extract_audit_log_items(data)
+            if items:
+                return items  # 첫 non-empty 응답 — 다른 변종 시도 안 함
+            empty_seen = True
+            # 빈 응답이면 다음 변종 시도 (다른 API/버전엔 데이터가 있을 수도 있음)
+
+        if empty_seen:
+            # 모든 변종이 '성공 + 빈 응답' — 해당 logtype 에 실제로 데이터가 없는 것.
+            return []
+
+        # 한 번도 성공한 변종이 없음 — 마지막 코드와 함께 통일된 한글 안내.
+        code = getattr(last_err, "code", None)
+        raise DsmAuthError(
+            "이 DSM 빌드에서 Log Center API 로 로그를 가져올 수 없습니다 "
+            f"(마지막 코드={code}). DSM '패키지 센터 → 로그 센터 → 설정' 에서 "
+            "기록 대상(WebDAV / SMB / File Station 등) 이 켜져 있는지 확인하고, "
+            "그래도 안 되면 '진단: 응답 원본 저장' 으로 파일을 만들어 주세요.",
+            code=code,
+        )
+
+    def collect_audit_log_diagnostics(self) -> dict[str, Any]:
+        """list_audit_logs 의 모든 변종 시도와 응답을 캡처해 dict 로 반환.
+
+        UI 의 '응답 원본 저장' 버튼이 이 결과를 JSON 으로 떠서
+        data/dumps/<ts>_dsm_audit_diag.json 에 저장 — fallback 추가 작업에 활용.
+
+        로그 센터 패키지 빌드는 logtype 별칭(`webdav`, `filestation`, `smb` 등)에 데이터
+        가 있을 수 있어 한 번에 여러 logtype 을 시도해 어느 조합에서 데이터가 잡히는지
+        한눈에 보여 준다.
+        """
+        self._diag_buffer = []
+        probe_logtypes = [
+            "file_transfer", "FileTransfer", "transfer", "file",
+            "webdav", "WebDAV",
+            "filestation", "FileStation", "file_station",
+            "smb", "SMB",
+            "audit", "audit_log",
+            "connection",  # 기준선 — 보통 잘 잡힘
+        ]
+        results: dict[str, dict[str, Any]] = {}
+        errors: list[dict[str, Any]] = []
+        for logtype in probe_logtypes:
+            try:
+                got = self.list_audit_logs(logtype=logtype, limit=20)
+                results[logtype] = {"count": len(got), "sample": got[:3]}
+            except Exception as e:
+                errors.append({"logtype": logtype, "error": str(e)})
+        attempts = list(self._diag_buffer or [])
+        self._diag_buffer = None
+        # 'logtype 중 어디에 데이터가 있었는지' 요약을 맨 앞에 박아 눈에 잘 띄게.
+        with_data = sorted(
+            (k for k, v in results.items() if v["count"] > 0),
+            key=lambda k: -results[k]["count"],
+        )
+        return {
+            "logtypes_with_data": with_data,
+            "summary": {k: v["count"] for k, v in results.items()},
+            "probes": results,
+            "errors": errors,
+            "attempts": attempts,
+        }
+
     def _find_group_gid(self, target_lower: str) -> int | None:
         """그룹 gid 를 찾아 반환.
 
@@ -881,6 +999,26 @@ def _extract_members_from_group_object(
             out = _extract_group_member_list({"users": raw})
             if out:
                 return out
+    return []
+
+
+def _extract_audit_log_items(data: dict[str, Any]) -> list[dict[str, Any]]:
+    """SYNO.Core.SyslogClient.Log / SYNO.LogCenter.Log 응답에서 항목 배열을 안전하게 추출.
+
+    빌드별 응답 구조가 달라 흔한 변종을 모두 시도:
+        data.items   — 7.x 다수 빌드
+        data.data    — 일부 빌드
+        data.logs    — Log Center 패키지
+        data 자체가 list — 드물게
+    """
+    if isinstance(data, list):
+        return [x for x in data if isinstance(x, dict)]
+    if not isinstance(data, dict):
+        return []
+    for k in ("items", "data", "logs", "log", "entries"):
+        v = data.get(k)
+        if isinstance(v, list):
+            return [x for x in v if isinstance(x, dict)]
     return []
 
 

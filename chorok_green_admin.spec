@@ -81,6 +81,12 @@ a = Analysis(
         'core.app_options',
         'core.progress_audio',
         'core.board_admin',
+        # core 패키지 — 자료실(NAS) 접속 로그
+        'core.nas_log_store',
+        'core.nas_log_service',
+        'core.nas_log_txt',
+        'core.nas_log_xlsx',
+        'core.nas_log_html',
         # core 패키지 — 자료실 구독비 관리
         'core.toss_xlsx',
         'core.payment_store',
@@ -118,6 +124,9 @@ a = Analysis(
         'ui.pending_member_dialog',
         'ui.progress_dialog',
         'ui.board_dialog',
+        # ui 패키지 — 자료실(NAS) 접속 로그
+        'ui.nas_log_dialog',
+        'ui.nas_log_export_dialog',
         # ui 패키지 (v1.0 신규)
         'ui.level_history_dialog',
         # ui 패키지 — 자료실 구독비 관리

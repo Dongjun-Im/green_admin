@@ -716,3 +716,180 @@ def test_list_group_members_propagates_other_errors():
         with pytest.raises(DsmAuthError) as exc:
             c.list_group_members("자료실 회원")
         assert exc.value.code == 105
+
+
+# ---------- list_audit_logs (NAS 접속 로그) — fallback 체인 ----------
+
+def _log_api_fake(responses_by_api: dict[str, list[_FakeResponse]] | None = None,
+                  *, default=None, capture: list | None = None):
+    """list_audit_logs 용 가짜 get — api 별로 응답 큐를 두고 순서대로 반환.
+
+    responses_by_api: {"SYNO.Core.SyslogClient.Log": [_FakeResponse(...)], ...}
+    capture: 호출된 (api, version, logtype) 튜플 기록.
+    """
+    queues = responses_by_api or {}
+
+    def fake(self, url, params=None, headers=None, data=None, **kwargs):
+        merged = dict(params or {})
+        if data:
+            merged.update(data)
+        api = merged.get("api", "")
+        if capture is not None:
+            capture.append((api, str(merged.get("version", "")), merged.get("logtype", "")))
+        q = queues.get(api)
+        if q:
+            return q.pop(0)
+        if default is not None:
+            return default
+        return _FakeResponse(200, {"success": False, "error": {"code": 102}})
+    return fake
+
+
+def test_list_audit_logs_first_variant_success():
+    """1차(LogCenter.Log v1) 에 데이터가 있으면 추가 변종은 시도하지 않는다."""
+    cap: list = []
+    body = {"success": True, "data": {"items": [
+        {"time": 1715500000, "user": "anycall", "descr": "test"},
+    ]}}
+    fake = _log_api_fake(
+        {"SYNO.LogCenter.Log": [_FakeResponse(200, body)]},
+        capture=cap,
+    )
+    with patch.object(requests.Session, "get", fake), patch.object(requests.Session, "post", fake):
+        c = _logged_in_client()
+        items = c.list_audit_logs("file_transfer", limit=10)
+    assert len(items) == 1
+    assert items[0]["user"] == "anycall"
+    # 첫 변종에서 데이터 받아 추가 시도 X
+    assert len(cap) == 1
+    assert cap[0][0] == "SYNO.LogCenter.Log"
+
+
+def test_list_audit_logs_empty_response_falls_through_to_next_variant():
+    """1차가 '성공 + 0건' 이어도 다음 변종을 시도해 데이터를 찾는다.
+    (실제 사용자 환경에서 SyslogClient.Log 는 빈 응답을 주고 LogCenter.Log 가 데이터 보유)"""
+    cap: list = []
+    fake = _log_api_fake({
+        # 1차 LogCenter.Log v1 → 빈 응답
+        "SYNO.LogCenter.Log": [
+            _FakeResponse(200, {"success": True, "data": {"items": []}}),
+            # 2차 LogCenter.Log v2 → 데이터
+            _FakeResponse(200, {"success": True, "data": {"items": [{"time": 1, "user": "x"}]}}),
+        ],
+    }, capture=cap)
+    with patch.object(requests.Session, "get", fake), patch.object(requests.Session, "post", fake):
+        c = _logged_in_client()
+        items = c.list_audit_logs("file_transfer", limit=10)
+    assert items and items[0]["user"] == "x"
+    # 두 번 호출됨 (빈 응답 후 다음 버전 시도)
+    assert len(cap) == 2
+
+
+def test_list_audit_logs_all_empty_returns_empty_list():
+    """모든 변종이 '성공 + 0건' 이면 빈 리스트 반환 (예외 아님 — logtype 데이터 없음 가능)."""
+    fake = _log_api_fake(default=_FakeResponse(200, {
+        "success": True, "data": {"items": []},
+    }))
+    with patch.object(requests.Session, "get", fake), patch.object(requests.Session, "post", fake):
+        c = _logged_in_client()
+        items = c.list_audit_logs("file_transfer", limit=10)
+    assert items == []
+
+
+def test_list_audit_logs_falls_back_through_variants():
+    """1차가 코드 400 으로 거부되면 다음 변종을 차례로 시도."""
+    cap: list = []
+    fake = _log_api_fake({
+        "SYNO.LogCenter.Log": [
+            # v1 → 400, v2 → 400
+            _FakeResponse(200, {"success": False, "error": {"code": 400}}),
+            _FakeResponse(200, {"success": False, "error": {"code": 400}}),
+        ],
+        # 다음 시도는 SyslogClient.Log 로 — 여기서 성공.
+        "SYNO.Core.SyslogClient.Log": [_FakeResponse(200, {
+            "success": True, "data": {"items": [{"time": 1, "user": "x"}]},
+        })],
+    }, capture=cap)
+    with patch.object(requests.Session, "get", fake), patch.object(requests.Session, "post", fake):
+        c = _logged_in_client()
+        items = c.list_audit_logs("file_transfer", limit=10)
+    assert items and items[0]["user"] == "x"
+    apis = [c[0] for c in cap]
+    assert apis[:2] == ["SYNO.LogCenter.Log", "SYNO.LogCenter.Log"]
+    assert "SYNO.Core.SyslogClient.Log" in apis
+
+
+def test_list_audit_logs_propagates_non_fallback_error():
+    """폴백 코드가 아닌 오류(예: 권한 105) 는 즉시 전파."""
+    fake = _log_api_fake({
+        "SYNO.LogCenter.Log": [
+            _FakeResponse(200, {"success": False, "error": {"code": 105}}),
+        ],
+    })
+    with patch.object(requests.Session, "get", fake), patch.object(requests.Session, "post", fake):
+        c = _logged_in_client()
+        with pytest.raises(DsmAuthError) as exc:
+            c.list_audit_logs("file_transfer")
+    assert exc.value.code == 105
+
+
+def test_list_audit_logs_all_variants_fail_gives_clear_error():
+    """모든 변종이 폴백 코드(102/400 등)로 실패하면 '로그 가져올 수 없습니다' 안내."""
+    # 모든 api 에 대해 102 응답을 줘서 모두 fallback 됨.
+    fake = _log_api_fake(default=_FakeResponse(200, {
+        "success": False, "error": {"code": 102},
+    }))
+    with patch.object(requests.Session, "get", fake), patch.object(requests.Session, "post", fake):
+        c = _logged_in_client()
+        with pytest.raises(DsmAuthError) as exc:
+            c.list_audit_logs("file_transfer")
+    msg = str(exc.value)
+    assert "Log Center" in msg or "파일 전송 로그" in msg
+    assert exc.value.code == 102
+
+
+def test_list_audit_logs_passes_logtype_and_since():
+    """logtype 과 start_epoch 가 요청 파라미터로 들어가야 한다."""
+    cap: list = []
+    # 빈 응답을 받으면 다음 변종까지 모두 시도하므로, 모든 변종에 빈 응답을 줘서 호출 1회로 제한 X
+    fake = _log_api_fake(default=_FakeResponse(200, {
+        "success": True, "data": {"items": []},
+    }), capture=cap)
+
+    # capture 에 logtype 까지 잡혀야 함
+    with patch.object(requests.Session, "get", fake), patch.object(requests.Session, "post", fake):
+        c = _logged_in_client()
+        c.list_audit_logs("connection", start_epoch=1700000000, limit=50)
+    # 모든 호출에 logtype=connection 으로 보내짐 (변종은 api/version 만 다름)
+    assert cap and all(c[2] == "connection" for c in cap)
+
+
+def test_collect_audit_log_diagnostics_probes_multiple_logtypes():
+    """진단 모드 — 여러 logtype 을 시도해 어떤 logtype 에 데이터가 있는지 요약."""
+    # webdav logtype 일 때만 데이터가 들어오는 환경 시뮬레이션.
+    call_count = {"n": 0}
+    body_data = {"success": True, "data": {"items": [
+        {"time": 1, "descr": "User [anycall] downloaded file [/x.zip]"},
+    ]}}
+    body_empty = {"success": True, "data": {"items": []}}
+
+    def fake(self, url, params=None, headers=None, data=None, **kw):
+        merged = dict(params or {})
+        if data:
+            merged.update(data)
+        logtype = merged.get("logtype", "")
+        # webdav 또는 connection 만 데이터 있음
+        if logtype in ("webdav", "connection"):
+            return _FakeResponse(200, body_data)
+        return _FakeResponse(200, body_empty)
+
+    with patch.object(requests.Session, "get", fake), patch.object(requests.Session, "post", fake):
+        c = _logged_in_client()
+        diag = c.collect_audit_log_diagnostics()
+    # 새 형식: logtypes_with_data 에 데이터가 들어온 logtype 들이 들어 있어야 함
+    assert "webdav" in diag["logtypes_with_data"]
+    assert "connection" in diag["logtypes_with_data"]
+    assert "file_transfer" not in diag["logtypes_with_data"]
+    # 모든 probe 별 카운트도 있어야 함
+    assert diag["summary"]["webdav"] >= 1
+    assert diag["summary"]["file_transfer"] == 0
