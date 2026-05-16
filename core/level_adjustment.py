@@ -6,7 +6,7 @@ from typing import Callable, Optional
 
 from dateutil.relativedelta import relativedelta
 
-from config import INACTIVITY_MONTHS, LEVEL_TRANSITIONS, WITHDRAW_LEVEL
+from config import GREEN3_BOARD, INACTIVITY_MONTHS, LEVEL_TRANSITIONS, WITHDRAW_LEVEL
 from core.crawler import MemberCrawler
 from core.member_admin import MemberAdminAdapter
 from core.models import (
@@ -23,6 +23,10 @@ ProgressCB = Callable[[int, int], None]
 class LevelAdjustmentService:
     INACTIVITY_MONTHS = INACTIVITY_MONTHS
     LEVEL_TRANSITIONS = LEVEL_TRANSITIONS
+    # 활동 기반 면제 임계 — green3('우리들의 이야기') 게시판에서
+    # 글·댓글이 각각 이 값 이상이면 6개월 미접속이어도 조정 대상에서 제외.
+    GREEN3_MIN_POSTS = 3
+    GREEN3_MIN_COMMENTS = 3
 
     def __init__(
         self,
@@ -32,6 +36,8 @@ class LevelAdjustmentService:
         cutoff_provider: Optional[Callable[[], date]] = None,
         log_writer=None,
         blocklist=None,
+        activity_counter=None,
+        green3_board: str = GREEN3_BOARD,
     ) -> None:
         self.crawler = crawler
         self.admin = admin
@@ -43,17 +49,26 @@ class LevelAdjustmentService:
         # 장기미접속으로 '탈퇴'(WITHDRAW_LEVEL) 처리된 회원 아이디를 보관해 두는
         # 명단(core.withdrawn_blocklist.WithdrawnBlocklist). 재가입 시 자동 거름용.
         self.blocklist = blocklist
+        # activity_counter 가 주어지면 6개월 미접속 후보에 대해 green3 글·댓글을
+        # 추가로 조회. 둘 다 GREEN3_MIN_POSTS/MIN_COMMENTS 이상이면 '접속자'로
+        # 인정하고 조정 대상에서 빼 준다. None 이면 로그인 날짜만 보던 예전 동작.
+        self.activity_counter = activity_counter
+        self.green3_board = green3_board
 
     def build_plan(
         self,
         progress_cb: Optional[ProgressCB] = None,
         members: Optional[list[Member]] = None,
+        activity_progress_cb: Optional[ProgressCB] = None,
     ) -> AdjustmentPlan:
         if members is None:
             members = self.crawler.fetch_all_members(progress_cb=progress_cb)
         cutoff = self.cutoff_provider()
 
+        # 1단계: 로그인 날짜 기준으로 1차 후보 추림. 'skip' 항목(파싱 실패)도
+        # 그대로 모은다. 활동 점검은 'delete'/'demote' 후보에만 적용.
         items: list[AdjustmentItem] = []
+        candidates: list[AdjustmentItem] = []  # 활동 점검 대상
         for m in members:
             # 본인 절대 제외
             if m.user_id.lower() == self.admin_user_id:
@@ -82,7 +97,7 @@ class LevelAdjustmentService:
             action, to_level = self.LEVEL_TRANSITIONS[m.level]
             days = (date.today() - m.last_login_date).days
             reason = f"{days}일 미접속 (기준: {cutoff.isoformat()} 이전)"
-            items.append(AdjustmentItem(
+            candidates.append(AdjustmentItem(
                 member=m,
                 action=action,
                 from_level=m.level,
@@ -90,11 +105,63 @@ class LevelAdjustmentService:
                 reason=reason,
             ))
 
+        # 2단계: 활동 점검. activity_counter 가 없으면 1차 후보를 그대로 사용
+        # (예전 동작 유지). 있으면 green3 글·댓글 카운트를 조회해서
+        # 글>=3 AND 댓글>=3 이면 '접속자'로 인정하고 빼 준다.
+        if self.activity_counter is None or not candidates:
+            items.extend(candidates)
+        else:
+            total = len(candidates)
+            for idx, item in enumerate(candidates, start=1):
+                if activity_progress_cb is not None:
+                    try:
+                        activity_progress_cb(idx, total)
+                    except Exception:
+                        pass
+                posts, comments = self._fetch_green3_activity(item.member.user_id)
+                if (
+                    posts is not None and comments is not None
+                    and posts >= self.GREEN3_MIN_POSTS
+                    and comments >= self.GREEN3_MIN_COMMENTS
+                ):
+                    # 활동 충분 → 접속자로 인정, 조정 대상에서 제외
+                    continue
+                if posts is None or comments is None:
+                    # 활동 카운트 조회 실패 → 안전하게 로그인 기준으로만 처리.
+                    items.append(item)
+                else:
+                    # 활동도 부족 → 미접속자로 분류. 활동량을 사유에 기록.
+                    items.append(AdjustmentItem(
+                        member=item.member,
+                        action=item.action,
+                        from_level=item.from_level,
+                        to_level=item.to_level,
+                        reason=(
+                            f"{item.reason}, green3 글 {posts}건/댓글 {comments}건 "
+                            f"(기준 미만)"
+                        ),
+                    ))
+
         return AdjustmentPlan(
             items=items,
             total_scanned=len(members),
             cutoff_date=cutoff,
         )
+
+    def _fetch_green3_activity(self, user_id: str) -> tuple[Optional[int], Optional[int]]:
+        """주어진 회원의 green3 글·댓글 수. 조회 실패 시 (None, None)."""
+        if self.activity_counter is None:
+            return (None, None)
+        try:
+            ma = self.activity_counter.fetch_member(
+                user_id, boards=(self.green3_board,),
+            )
+        except Exception:
+            return (None, None)
+        ba = ma.by_board.get(self.green3_board)
+        if ba is None:
+            return (None, None)
+        return (ba.posts, ba.comments)
 
     def apply_plan(
         self,

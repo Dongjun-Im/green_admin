@@ -21,6 +21,7 @@ from config import (
     LOGS_DIR,
 )
 from core import app_options
+from core.activity_counter import ActivityCounter
 from core.backup_retention import DEFAULT_RETENTION_MONTHS, archive_old_backups
 from core.backup_service import BackupService
 from core.crawler import MemberCrawler
@@ -755,12 +756,16 @@ class MainFrame(wx.Frame):
             admin_user_id=self.admin_user_id,
             log_writer=self.log_writer,
             blocklist=self.inactivity_blocklist,
+            activity_counter=ActivityCounter(self.session),
         )
 
         def worker(progress_cb):
             return service.build_plan(
                 progress_cb=lambda c, t: progress_cb(
                     c, t, f"회원 페이지 수집 {c}/{t}",
+                ),
+                activity_progress_cb=lambda c, t: progress_cb(
+                    c, t, f"green3 활동 점검 {c}/{t}",
                 ),
             )
 
@@ -836,6 +841,7 @@ class MainFrame(wx.Frame):
             admin_user_id=self.admin_user_id,
             log_writer=self.log_writer,
             blocklist=self.inactivity_blocklist,
+            activity_counter=ActivityCounter(self.session),
         )
         try:
             report = service.apply_plan(plan, progress_cb=self._item_progress_cb)
