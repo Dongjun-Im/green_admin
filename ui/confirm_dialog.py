@@ -109,6 +109,12 @@ class ConfirmAdjustmentDialog(wx.Dialog):
             target = LEVEL_LABELS.get(item.to_level, f"레벨 {item.to_level}")
         else:
             target = "변경 없음"
+        if item.green3_posts is None and item.green3_comments is None:
+            activity_line = "green3 활동: (조회 안 함 또는 조회 실패)"
+        else:
+            posts = item.green3_posts if item.green3_posts is not None else "?"
+            comments = item.green3_comments if item.green3_comments is not None else "?"
+            activity_line = f"green3 활동: 글 {posts}건 / 댓글 {comments}건"
         return (
             f"아이디: {m.user_id}\n"
             f"이름: {m.name}\n"
@@ -116,6 +122,7 @@ class ConfirmAdjustmentDialog(wx.Dialog):
             f"현재 등급: {LEVEL_LABELS.get(m.level, m.level_label or f'레벨 {m.level}')} (레벨 {m.level})\n"
             f"조정 후: {target}\n"
             f"마지막 접속일: {last}\n"
+            f"{activity_line}\n"
             f"가입일: {join}\n"
             f"사유: {item.reason}\n"
             f"동작: {item.action}"

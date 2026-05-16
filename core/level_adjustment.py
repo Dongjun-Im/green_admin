@@ -126,21 +126,19 @@ class LevelAdjustmentService:
                 ):
                     # 활동 충분 → 접속자로 인정, 조정 대상에서 제외
                     continue
+                # 활동 카운트는 그대로 항목에 실어 둠 (UI 목록상자가 그대로 표시).
+                item.green3_posts = posts
+                item.green3_comments = comments
                 if posts is None or comments is None:
                     # 활동 카운트 조회 실패 → 안전하게 로그인 기준으로만 처리.
                     items.append(item)
                 else:
-                    # 활동도 부족 → 미접속자로 분류. 활동량을 사유에 기록.
-                    items.append(AdjustmentItem(
-                        member=item.member,
-                        action=item.action,
-                        from_level=item.from_level,
-                        to_level=item.to_level,
-                        reason=(
-                            f"{item.reason}, green3 글 {posts}건/댓글 {comments}건 "
-                            f"(기준 미만)"
-                        ),
-                    ))
+                    # 활동도 부족 → 미접속자로 분류. 활동량을 사유에도 함께 기록.
+                    item.reason = (
+                        f"{item.reason}, green3 글 {posts}건/댓글 {comments}건 "
+                        f"(기준 미만)"
+                    )
+                    items.append(item)
 
         return AdjustmentPlan(
             items=items,

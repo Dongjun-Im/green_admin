@@ -199,3 +199,64 @@ def test_activity_progress_cb_called_per_candidate():
         activity_progress_cb=lambda c, t: progress.append((c, t)),
     )
     assert progress == [(1, 3), (2, 3), (3, 3)]
+
+
+# ---------------------------------------------------------------------------
+# 8. AdjustmentItem 에 green3 카운트가 실리고 display() 가 표시
+# ---------------------------------------------------------------------------
+
+
+def test_adjustment_item_carries_green3_counts():
+    counter = _FakeActivityCounter(counts={"u": (1, 2)})
+    svc = _service(activity_counter=counter)
+    members = [_make_member("u", 5, last_login=date(2025, 1, 1))]
+    plan = svc.build_plan(members=members)
+    item = plan.actionable[0]
+    assert item.green3_posts == 1
+    assert item.green3_comments == 2
+
+
+def test_display_includes_last_login_and_activity():
+    counter = _FakeActivityCounter(counts={"u": (1, 2)})
+    svc = _service(activity_counter=counter)
+    members = [_make_member("u", 5, last_login=date(2025, 4, 30))]
+    plan = svc.build_plan(members=members)
+    line = plan.actionable[0].display()
+    assert "마지막접속 2025-04-30" in line
+    assert "글 1건" in line
+    assert "댓글 2건" in line
+
+
+def test_display_omits_activity_when_counter_failed():
+    counter = _FakeActivityCounter(counts={}, raises_for={"u"})
+    svc = _service(activity_counter=counter)
+    members = [_make_member("u", 5, last_login=date(2025, 4, 30))]
+    plan = svc.build_plan(members=members)
+    line = plan.actionable[0].display()
+    assert "마지막접속 2025-04-30" in line
+    # 활동 정보 없으니 "글 N건 / 댓글 M건" 부분은 안 붙음
+    assert "글 " not in line
+    assert "댓글 " not in line
+
+
+def test_display_omits_activity_in_legacy_mode_without_counter():
+    svc = _service(activity_counter=None)
+    members = [_make_member("u", 5, last_login=date(2025, 4, 30))]
+    plan = svc.build_plan(members=members)
+    line = plan.actionable[0].display()
+    assert "마지막접속 2025-04-30" in line
+    assert "글 " not in line
+
+
+def test_display_shows_question_mark_when_activity_partial():
+    """카운트 한쪽만 None — 이 코드 경로는 현재 안 생기지만 forward-compat."""
+    from core.models import AdjustmentItem, Member
+    m = Member(user_id="u", name="U", nickname="닉_u", level=5,
+               level_label="", last_login_date=date(2025, 4, 30))
+    item = AdjustmentItem(
+        member=m, action="demote", from_level=5, to_level=4,
+        reason="test", green3_posts=2, green3_comments=None,
+    )
+    line = item.display()
+    # 양쪽 다 채워져야 표시 — 한쪽만 None 이면 표시 안 함 (기존 정책 유지)
+    assert "글 " not in line

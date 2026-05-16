@@ -59,6 +59,9 @@ class AdjustmentItem:
     from_level: int
     to_level: Optional[int]
     reason: str
+    # v1.2.7: 장기미접속 판정에 같이 본 green3 활동량. None = 조회 안 했거나 실패.
+    green3_posts: Optional[int] = None
+    green3_comments: Optional[int] = None
 
     def display(self) -> str:
         from config import LEVEL_LABELS
@@ -68,18 +71,28 @@ class AdjustmentItem:
         cur_label = LEVEL_LABELS.get(
             self.from_level, self.member.level_label or f"레벨 {self.from_level}"
         )
+        last = (
+            self.member.last_login_date.isoformat()
+            if self.member.last_login_date else "알 수 없음"
+        )
+        activity = ""
+        if self.green3_posts is not None and self.green3_comments is not None:
+            activity = f" / 글 {self.green3_posts}건 / 댓글 {self.green3_comments}건"
         if self.action == "demote":
             target = LEVEL_LABELS.get(self.to_level or 0, f"레벨 {self.to_level}")
             return (
-                f"{self.member.user_id} / {nick} / "
-                f"{cur_label} → {target} / {self.reason}"
+                f"{self.member.user_id} / {nick} / {cur_label} → {target} / "
+                f"마지막접속 {last}{activity}"
             )
         if self.action == "delete":
             return (
-                f"{self.member.user_id} / {nick} / "
-                f"{cur_label} → 탈퇴 / {self.reason}"
+                f"{self.member.user_id} / {nick} / {cur_label} → 탈퇴 / "
+                f"마지막접속 {last}{activity}"
             )
-        return f"{self.member.user_id} / {nick} / 건너뜀 / {self.reason}"
+        return (
+            f"{self.member.user_id} / {nick} / 건너뜀 / "
+            f"마지막접속 {last}"
+        )
 
 
 @dataclass
