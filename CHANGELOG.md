@@ -1,5 +1,29 @@
 # CHANGELOG
 
+## v1.2.9 (2026-05-17)
+
+자동 업데이트의 '지금 설치' 흐름을 **클릭 없이** 진행되도록 무인(silent) 설치로 전환.
+
+### 변경 — 무인 자동 설치
+- 새 버전 알림에서 '지금 받기' → 다운로드 진행률 → "지금 설치하고 재시작" 클릭
+  한 번이면 설치관리자가 자동으로 진행되고, 끝나면 새 버전이 자동으로 켜집니다.
+  설치 마법사의 "Next, Next, Install" 클릭 단계가 모두 사라졌습니다.
+- `ui/main_frame.py:on_install_update` — `subprocess.Popen` 으로 설치관리자를
+  실행할 때 `/SP- /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS
+  /RESTARTAPPLICATIONS` 플래그를 전달. DETACHED_PROCESS + CREATE_NEW_PROCESS_GROUP
+  로 부모-자식 관계 분리.
+- `installer.iss` — `[Run]` 항목에서 `skipifsilent` 플래그 제거. /VERYSILENT
+  모드에서도 새 EXE 가 자동으로 실행되도록.
+
+### 매뉴얼
+- `ui/manual_dialog.py` + 동봉 매뉴얼 TXT — '프로그램 업데이트' 챕터에
+  "설치는 자동으로 진행됨" 안내 추가.
+
+### 운영자 안내
+- 본 변경은 **v1.2.9 부터** 적용됨. v1.2.7 이하 사용자는 이번 업데이트에서는
+  설치 마법사가 한 번 더 보임. v1.2.9 가 깔린 뒤 다음 업데이트부터 무인 설치 동작.
+
+
 ## v1.2.8 (2026-05-17)
 
 회원 검색(Ctrl+F) 다이얼로그에 게시판 활동량 + 마지막 접속일 표시 추가.

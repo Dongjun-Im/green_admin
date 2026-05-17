@@ -73,6 +73,26 @@ from ui.search_dialog import MemberSearchDialog
 from ui.stats_dialog import StatsDialog
 
 
+# Inno Setup 무인(silent) 설치 플래그 — 자동 업데이트 흐름에서 사용 (v1.2.9).
+# 각 플래그 의미:
+#   /SP-              초반 "Are you sure you want to install?" 안내 화면 생략
+#   /VERYSILENT       설치 마법사 UI 완전히 숨김 (진행률 창도 안 뜸)
+#   /SUPPRESSMSGBOXES 확인 메시지박스 자동 '예' 처리
+#   /NORESTART        Windows 재부팅 절대 안 함 (사용자 작업 보호)
+#   /CLOSEAPPLICATIONS    실행 중인 앱이 파일 잠금 시 자동 종료
+#   /RESTARTAPPLICATIONS  설치 끝나면 닫혔던 앱 자동 재시작
+# installer.iss 의 [Run] 항목에서 skipifsilent 플래그를 빼 두어, /VERYSILENT
+# 모드에서도 새 EXE 가 [Run] 으로 자동 실행되도록 했음.
+SILENT_INSTALL_FLAGS: tuple[str, ...] = (
+    "/SP-",
+    "/VERYSILENT",
+    "/SUPPRESSMSGBOXES",
+    "/NORESTART",
+    "/CLOSEAPPLICATIONS",
+    "/RESTARTAPPLICATIONS",
+)
+
+
 # 메뉴 ID
 ID_BACKUP_NOW = wx.NewIdRef()
 ID_ADJUST_PREVIEW = wx.NewIdRef()
@@ -1277,7 +1297,8 @@ class MainFrame(wx.Frame):
                 "받기가 끝났습니다.\n"
                 f"파일: {downloaded.name}\n\n"
                 "지금 설치하고 프로그램을 재시작하시겠습니까?\n"
-                "(나중에 누르시면 받은 파일 경로만 알려 드리고 프로그램은 그대로 둡니다.)"
+                "(설치는 클릭 없이 자동으로 진행되고, 끝나면 새 버전이 자동으로 켜집니다.\n"
+                "나중에 누르시면 받은 파일 경로만 알려 드리고 프로그램은 그대로 둡니다.)"
             )
             ans = wx.MessageBox(
                 prompt, "설치", wx.YES_NO | wx.ICON_QUESTION,
@@ -1285,7 +1306,17 @@ class MainFrame(wx.Frame):
             if ans == wx.YES:
                 try:
                     if sys.platform == "win32":
-                        os.startfile(str(downloaded))  # noqa: SIM115
+                        # 본 EXE 와 부모-자식 관계를 끊어 둬야 본 EXE 가 종료돼도
+                        # 설치관리자가 계속 동작.
+                        DETACHED_FLAGS = (
+                            getattr(subprocess, "DETACHED_PROCESS", 0)
+                            | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                        )
+                        subprocess.Popen(
+                            [str(downloaded), *SILENT_INSTALL_FLAGS],
+                            creationflags=DETACHED_FLAGS,
+                            close_fds=True,
+                        )
                     else:
                         subprocess.Popen([str(downloaded)])
                 except Exception as e:

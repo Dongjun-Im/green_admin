@@ -17,7 +17,7 @@ import os
 import sys
 
 APP_NAME = "초록등대 회원관리"
-APP_VERSION = "1.2.8"
+APP_VERSION = "1.2.9"
 
 # 실행 위치 (PyInstaller 호환)
 if getattr(sys, "frozen", False):

@@ -8,7 +8,7 @@
 ;   (build_release.py 가 1)+2) 와 무설치 ZIP 까지 한 번에 해 줌)
 
 #define AppName          "초록등대 회원관리"
-#define AppVersion       "1.2.8"
+#define AppVersion       "1.2.9"
 #define AppPublisher     "초록등대 동호회"
 #define AppExeName       "초록등대회원관리.exe"
 #define SourceDir        "dist\초록등대회원관리"
@@ -51,4 +51,8 @@ Name: "{group}\{cm:UninstallProgram,{#AppName}}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\{#AppExeName}"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall skipifsilent
+; postinstall: 정상(대화형) 설치 후 마지막 화면의 "프로그램 실행" 체크박스용.
+; nowait: 본 설치관리자를 잠그지 않고 곧장 자기 EXE 실행.
+; skipifsilent 를 일부러 제외 — /VERYSILENT 자동 업데이트 흐름에서도 새 버전이
+; 자동으로 켜져야 하기 때문 (v1.2.9 무인 설치 흐름).
+Filename: "{app}\{#AppExeName}"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall
