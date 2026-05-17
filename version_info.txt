@@ -5,8 +5,8 @@
 # 버전을 올릴 때: 아래 filevers/prodvers 튜플과 FileVersion/ProductVersion 문자열을 함께 수정.
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(1, 2, 6, 0),
-    prodvers=(1, 2, 6, 0),
+    filevers=(1, 2, 7, 0),
+    prodvers=(1, 2, 7, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -22,12 +22,12 @@ VSVersionInfo(
           [
             StringStruct('CompanyName', '초록등대 동호회'),
             StringStruct('FileDescription', '초록등대 회원관리 (동호회관리자 전용)'),
-            StringStruct('FileVersion', '1.2.6'),
+            StringStruct('FileVersion', '1.2.7'),
             StringStruct('InternalName', 'chorok_green_admin'),
             StringStruct('LegalCopyright', 'Copyright (C) 2026 초록등대 동호회'),
             StringStruct('OriginalFilename', '초록등대회원관리.exe'),
             StringStruct('ProductName', '초록등대 회원관리'),
-            StringStruct('ProductVersion', '1.2.6'),
+            StringStruct('ProductVersion', '1.2.7'),
           ]
         )
       ]

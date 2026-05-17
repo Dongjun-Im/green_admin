@@ -1,5 +1,40 @@
 # CHANGELOG
 
+## v1.2.7 (2026-05-16)
+
+장기미접속 등급 조정의 판정 기준 보강 + 미리보기 화면 정보 추가.
+
+### 추가/변경 — 장기미접속 판정에 활동 기반 면제
+- 기존: 마지막 접속이 6개월 넘으면 무조건 등급 조정 대상.
+- 변경: 6개월 미접속 **그리고** '우리들의 이야기'(green3) 게시판 글 < 3 또는
+  댓글 < 3 일 때만 미접속자로 분류. 6개월 미접속이어도 green3 글·댓글이
+  각각 3건 이상이면 '접속자' 로 인정 → 조정 대상에서 빠짐.
+- `core/level_adjustment.py:LevelAdjustmentService` — `activity_counter`
+  주입점 + `build_plan` 2단계 처리(로그인 기준 1차 → green3 활동 점검 2차).
+  활동 부족 사유는 "green3 글 N건/댓글 M건 (기준 미만)" 으로 표시. 임계값은
+  `GREEN3_MIN_POSTS=3`, `GREEN3_MIN_COMMENTS=3` 클래스 상수.
+- `ui/main_frame.py` — 미리보기·실제 적용 양쪽에 `ActivityCounter(self.session)`
+  주입, 진행 게이지에 'green3 활동 점검 N/M' 메시지.
+
+### 추가 — 미리보기 목록상자에 마지막 접속일·green3 활동량 표시
+- 목록상자 한 줄에 마지막 접속 날짜와 green3 글·댓글 수가 같이 보입니다:
+  `"anycall / 임동준 / 일반회원 → 준회원 / 마지막접속 2025-04-12 / 글 1건 / 댓글 0건"`
+- `core/models.py:AdjustmentItem` — `green3_posts` / `green3_comments` 필드
+  추가 (Optional[int]). `display()` 가 마지막접속 + (있을 때만) 글·댓글 표시.
+- `ui/confirm_dialog.py:_format_detail` — 상세 패널에 "green3 활동: 글 N건 /
+  댓글 M건" 줄 추가. 카운터 조회 안 했거나 실패면 "(조회 안 함 또는 조회 실패)".
+
+### 매뉴얼
+- `ui/manual_dialog.py` + 동봉 매뉴얼 TXT — '오래 안 들어온 회원 등급 조정'
+  챕터에 새 판정 기준(AND 조건) 명시.
+
+### 테스트
+- `tests/test_level_adjustment.py` 신규 19개: legacy 모드 동작 보존,
+  임계값 경계(=3), 글·댓글 한쪽만 부족, 카운터 예외 시 안전 폴백, 6개월 이내
+  접속자/관리자/명예회원에 활동 조회 안 부름, 진행 콜백 호출 횟수, 새 필드 전달,
+  display 의 마지막접속·활동 노출. 총 503/503 통과.
+
+
 ## v1.2.6 (2026-05-16)
 
 자동 업데이트가 그동안은 "새 버전 있습니다" 알림 + 릴리스 페이지 링크만 보여 줘서
