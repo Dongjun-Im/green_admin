@@ -6,7 +6,13 @@ from typing import Callable, Optional
 
 from dateutil.relativedelta import relativedelta
 
-from config import GREEN3_BOARD, INACTIVITY_MONTHS, LEVEL_TRANSITIONS, WITHDRAW_LEVEL
+from config import (
+    GREEN3_BOARD,
+    INACTIVITY_MONTHS,
+    INACTIVITY_MONTHS_HARD,
+    LEVEL_TRANSITIONS,
+    WITHDRAW_LEVEL,
+)
 from core.crawler import MemberCrawler
 from core.member_admin import MemberAdminAdapter
 from core.models import (
@@ -22,9 +28,12 @@ ProgressCB = Callable[[int, int], None]
 
 class LevelAdjustmentService:
     INACTIVITY_MONTHS = INACTIVITY_MONTHS
+    # v1.2.10: 활동량 면제의 안전 상한 — 이만큼 안 들어오면 글·댓글 많아도 조정 대상.
+    INACTIVITY_MONTHS_HARD = INACTIVITY_MONTHS_HARD
     LEVEL_TRANSITIONS = LEVEL_TRANSITIONS
-    # 활동 기반 면제 임계 — green3('우리들의 이야기') 게시판에서
-    # 글·댓글이 각각 이 값 이상이면 6개월 미접속이어도 조정 대상에서 제외.
+    # 활동 기반 면제 임계 — green3('우리들의 이야기') 게시판에서 글·댓글이 각각
+    # 이 값 이상이면 6~12개월 미접속이어도 조정 대상에서 제외. 단 12개월(=
+    # INACTIVITY_MONTHS_HARD) 을 넘으면 활동량과 무관하게 다시 조정 대상.
     GREEN3_MIN_POSTS = 3
     GREEN3_MIN_COMMENTS = 3
 
@@ -38,6 +47,7 @@ class LevelAdjustmentService:
         blocklist=None,
         activity_counter=None,
         green3_board: str = GREEN3_BOARD,
+        hard_cutoff_provider: Optional[Callable[[], date]] = None,
     ) -> None:
         self.crawler = crawler
         self.admin = admin
@@ -45,13 +55,20 @@ class LevelAdjustmentService:
         self.cutoff_provider = cutoff_provider or (
             lambda: date.today() - relativedelta(months=self.INACTIVITY_MONTHS)
         )
+        # v1.2.10: 1년 이상 미접속 컷오프. cutoff 보다 이전이라야 의미가 있고
+        # (날짜가 더 과거), 활동량 면제를 무력화하는 안전 상한이다.
+        self.hard_cutoff_provider = hard_cutoff_provider or (
+            lambda: date.today() - relativedelta(months=self.INACTIVITY_MONTHS_HARD)
+        )
         self.log_writer = log_writer
         # 장기미접속으로 '탈퇴'(WITHDRAW_LEVEL) 처리된 회원 아이디를 보관해 두는
         # 명단(core.withdrawn_blocklist.WithdrawnBlocklist). 재가입 시 자동 거름용.
         self.blocklist = blocklist
-        # activity_counter 가 주어지면 6개월 미접속 후보에 대해 green3 글·댓글을
+        # activity_counter 가 주어지면 6개월~12개월 미접속 후보에 대해 green3 글·댓글을
         # 추가로 조회. 둘 다 GREEN3_MIN_POSTS/MIN_COMMENTS 이상이면 '접속자'로
-        # 인정하고 조정 대상에서 빼 준다. None 이면 로그인 날짜만 보던 예전 동작.
+        # 인정하고 조정 대상에서 빼 준다. 1년+ 미접속자는 무조건 조정 대상이므로
+        # 활동 조회는 안 부르지만, UI 표시용으로 한 번은 조회한다.
+        # None 이면 로그인 날짜만 보던 예전 동작.
         self.activity_counter = activity_counter
         self.green3_board = green3_board
 
@@ -64,11 +81,14 @@ class LevelAdjustmentService:
         if members is None:
             members = self.crawler.fetch_all_members(progress_cb=progress_cb)
         cutoff = self.cutoff_provider()
+        hard_cutoff = self.hard_cutoff_provider()
 
         # 1단계: 로그인 날짜 기준으로 1차 후보 추림. 'skip' 항목(파싱 실패)도
         # 그대로 모은다. 활동 점검은 'delete'/'demote' 후보에만 적용.
+        # candidates 의 각 튜플: (AdjustmentItem, beyond_hard_cutoff)
+        #   beyond_hard_cutoff=True → 1년+ 미접속, 활동 면제 적용 안 함.
         items: list[AdjustmentItem] = []
-        candidates: list[AdjustmentItem] = []  # 활동 점검 대상
+        candidates: list[tuple[AdjustmentItem, bool]] = []
         for m in members:
             # 본인 절대 제외
             if m.user_id.lower() == self.admin_user_id:
@@ -96,29 +116,54 @@ class LevelAdjustmentService:
 
             action, to_level = self.LEVEL_TRANSITIONS[m.level]
             days = (date.today() - m.last_login_date).days
-            reason = f"{days}일 미접속 (기준: {cutoff.isoformat()} 이전)"
-            candidates.append(AdjustmentItem(
-                member=m,
-                action=action,
-                from_level=m.level,
-                to_level=to_level,
-                reason=reason,
+            beyond_hard = m.last_login_date <= hard_cutoff
+            if beyond_hard:
+                reason = (
+                    f"{days}일 미접속 "
+                    f"({self.INACTIVITY_MONTHS_HARD}개월 초과 — 활동량 무관)"
+                )
+            else:
+                reason = f"{days}일 미접속 (기준: {cutoff.isoformat()} 이전)"
+            candidates.append((
+                AdjustmentItem(
+                    member=m,
+                    action=action,
+                    from_level=m.level,
+                    to_level=to_level,
+                    reason=reason,
+                ),
+                beyond_hard,
             ))
 
         # 2단계: 활동 점검. activity_counter 가 없으면 1차 후보를 그대로 사용
-        # (예전 동작 유지). 있으면 green3 글·댓글 카운트를 조회해서
-        # 글>=3 AND 댓글>=3 이면 '접속자'로 인정하고 빼 준다.
+        # (예전 동작 유지). 있으면 green3 글·댓글 카운트를 조회.
+        # · 1년+ 미접속(beyond_hard): 활동량 면제 없음. 단 UI 표시용으로 카운트만 채움.
+        # · 6~12개월 미접속: 글>=3 AND 댓글>=3 이면 '접속자' 로 인정해 빼 줌.
         if self.activity_counter is None or not candidates:
-            items.extend(candidates)
+            items.extend(item for item, _ in candidates)
         else:
             total = len(candidates)
-            for idx, item in enumerate(candidates, start=1):
+            for idx, (item, beyond_hard) in enumerate(candidates, start=1):
                 if activity_progress_cb is not None:
                     try:
                         activity_progress_cb(idx, total)
                     except Exception:
                         pass
                 posts, comments = self._fetch_green3_activity(item.member.user_id)
+                item.green3_posts = posts
+                item.green3_comments = comments
+
+                if beyond_hard:
+                    # 1년+ 미접속 — 활동량과 무관. 활동량은 사유에 부기로만 추가.
+                    if posts is not None and comments is not None:
+                        item.reason = (
+                            f"{item.reason}, "
+                            f"green3 글 {posts}건/댓글 {comments}건"
+                        )
+                    items.append(item)
+                    continue
+
+                # 6~12개월 — 면제 판정 가능
                 if (
                     posts is not None and comments is not None
                     and posts >= self.GREEN3_MIN_POSTS
@@ -126,9 +171,6 @@ class LevelAdjustmentService:
                 ):
                     # 활동 충분 → 접속자로 인정, 조정 대상에서 제외
                     continue
-                # 활동 카운트는 그대로 항목에 실어 둠 (UI 목록상자가 그대로 표시).
-                item.green3_posts = posts
-                item.green3_comments = comments
                 if posts is None or comments is None:
                     # 활동 카운트 조회 실패 → 안전하게 로그인 기준으로만 처리.
                     items.append(item)

@@ -19,7 +19,7 @@ def _make_member(user_id, level, last_login):
     )
 
 
-def _service(activity_counter=None):
+def _service(activity_counter=None, hard_cutoff=None):
     from core.level_adjustment import LevelAdjustmentService
 
     class _FakeAdmin:
@@ -27,11 +27,15 @@ def _service(activity_counter=None):
         def bulk_apply(self, level_map, action_label=""):
             return MagicMock(success=True, message="ok")
 
+    # 기본 hard_cutoff = 2025-07-01 (cutoff 2026-01-01 보다 6개월 더 과거).
+    # 회원의 last_login 이 이 날짜 이하면 1년+ 미접속으로 간주.
+    hc = hard_cutoff if hard_cutoff is not None else date(2025, 7, 1)
     return LevelAdjustmentService(
         crawler=None,
         admin=_FakeAdmin(),
         admin_user_id="rtgreen",
         cutoff_provider=lambda: date(2026, 1, 1),
+        hard_cutoff_provider=lambda: hc,
         activity_counter=activity_counter,
     )
 
@@ -86,7 +90,7 @@ def test_login_only_mode_still_works_without_activity_counter():
 def test_active_member_with_enough_green3_posts_and_comments_is_skipped():
     counter = _FakeActivityCounter(counts={"active": (5, 10)})
     svc = _service(activity_counter=counter)
-    members = [_make_member("active", 5, last_login=date(2025, 1, 1))]
+    members = [_make_member("active", 5, last_login=date(2025, 9, 1))]
     plan = svc.build_plan(members=members)
     # 6개월+ 미접속이지만 green3 활동 충분 → 빈 계획
     assert plan.actionable == []
@@ -97,7 +101,7 @@ def test_active_member_with_enough_green3_posts_and_comments_is_skipped():
 def test_threshold_is_inclusive(posts, comments):
     counter = _FakeActivityCounter(counts={"u": (posts, comments)})
     svc = _service(activity_counter=counter)
-    members = [_make_member("u", 5, last_login=date(2025, 1, 1))]
+    members = [_make_member("u", 5, last_login=date(2025, 9, 1))]
     plan = svc.build_plan(members=members)
     # 임계값(3) 포함 — 정확히 3이어도 면제
     assert plan.actionable == []
@@ -117,7 +121,7 @@ def test_threshold_is_inclusive(posts, comments):
 def test_insufficient_activity_keeps_member_in_plan(posts, comments, why):
     counter = _FakeActivityCounter(counts={"u": (posts, comments)})
     svc = _service(activity_counter=counter)
-    members = [_make_member("u", 5, last_login=date(2025, 1, 1))]
+    members = [_make_member("u", 5, last_login=date(2025, 9, 1))]
     plan = svc.build_plan(members=members)
     actionable = plan.actionable
     assert len(actionable) == 1, why
@@ -136,7 +140,7 @@ def test_insufficient_activity_keeps_member_in_plan(posts, comments, why):
 def test_activity_counter_failure_falls_back_to_login_only():
     counter = _FakeActivityCounter(counts={}, raises_for={"u"})
     svc = _service(activity_counter=counter)
-    members = [_make_member("u", 5, last_login=date(2025, 1, 1))]
+    members = [_make_member("u", 5, last_login=date(2025, 9, 1))]
     plan = svc.build_plan(members=members)
     # 활동 조회 실패 → 안전한 쪽으로 조정 대상 유지 (예전 동작)
     actionable = plan.actionable
@@ -169,11 +173,11 @@ def test_admin_self_and_excluded_levels_never_hit_activity_counter():
     counter = _FakeActivityCounter(counts={})
     svc = _service(activity_counter=counter)
     members = [
-        _make_member("rtgreen", 5, last_login=date(2025, 1, 1)),    # 본인
+        _make_member("rtgreen", 5, last_login=date(2025, 9, 1)),    # 본인
         Member(user_id="boss", name="BOSS", nickname="",
-               level=9, level_label="", last_login_date=date(2025, 1, 1),
+               level=9, level_label="", last_login_date=date(2025, 9, 1),
                is_admin=True),                                       # 관리자
-        _make_member("honor", 8, last_login=date(2025, 1, 1)),       # 명예회원 (조정 대상 아님)
+        _make_member("honor", 8, last_login=date(2025, 9, 1)),       # 명예회원 (조정 대상 아님)
     ]
     plan = svc.build_plan(members=members)
     assert plan.actionable == []
@@ -189,9 +193,9 @@ def test_activity_progress_cb_called_per_candidate():
     counter = _FakeActivityCounter(counts={"a": (0, 0), "b": (5, 5), "c": (1, 1)})
     svc = _service(activity_counter=counter)
     members = [
-        _make_member("a", 5, last_login=date(2025, 1, 1)),
-        _make_member("b", 5, last_login=date(2025, 1, 1)),
-        _make_member("c", 5, last_login=date(2025, 1, 1)),
+        _make_member("a", 5, last_login=date(2025, 9, 1)),
+        _make_member("b", 5, last_login=date(2025, 9, 1)),
+        _make_member("c", 5, last_login=date(2025, 9, 1)),
     ]
     progress = []
     svc.build_plan(
@@ -209,7 +213,7 @@ def test_activity_progress_cb_called_per_candidate():
 def test_adjustment_item_carries_green3_counts():
     counter = _FakeActivityCounter(counts={"u": (1, 2)})
     svc = _service(activity_counter=counter)
-    members = [_make_member("u", 5, last_login=date(2025, 1, 1))]
+    members = [_make_member("u", 5, last_login=date(2025, 9, 1))]
     plan = svc.build_plan(members=members)
     item = plan.actionable[0]
     assert item.green3_posts == 1
@@ -260,3 +264,80 @@ def test_display_shows_question_mark_when_activity_partial():
     line = item.display()
     # 양쪽 다 채워져야 표시 — 한쪽만 None 이면 표시 안 함 (기존 정책 유지)
     assert "글 " not in line
+
+
+# ---------------------------------------------------------------------------
+# 9. 1년+ 미접속 (hard cutoff) — 활동량과 무관하게 조정 대상 (v1.2.10)
+# ---------------------------------------------------------------------------
+
+
+def test_one_year_plus_inactive_overrides_activity_exemption():
+    """green3 활동이 많아도 1년 이상 미접속이면 조정 대상."""
+    counter = _FakeActivityCounter(counts={"u": (50, 100)})
+    svc = _service(activity_counter=counter)
+    # hard_cutoff 가 2025-07-01 (cutoff 2026-01-01 보다 6개월 앞). 회원 last_login=
+    # 2025-06-01 → 1년+ 미접속 그룹.
+    members = [_make_member("u", 5, last_login=date(2025, 6, 1))]
+    plan = svc.build_plan(members=members)
+    actionable = plan.actionable
+    assert len(actionable) == 1, "1년+ 미접속자는 활동량과 무관하게 조정 대상"
+    # 활동량은 그대로 항목에 실리고
+    assert actionable[0].green3_posts == 50
+    assert actionable[0].green3_comments == 100
+    # 사유에는 "12개월 초과 — 활동량 무관" 이 포함돼야 함
+    assert "12개월 초과" in actionable[0].reason
+    assert "활동량 무관" in actionable[0].reason
+
+
+def test_one_year_plus_inactive_with_zero_activity():
+    """1년+ 미접속이고 활동도 없으면 당연히 조정 대상."""
+    counter = _FakeActivityCounter(counts={"u": (0, 0)})
+    svc = _service(activity_counter=counter)
+    members = [_make_member("u", 5, last_login=date(2024, 12, 1))]
+    plan = svc.build_plan(members=members)
+    actionable = plan.actionable
+    assert len(actionable) == 1
+    assert "12개월 초과" in actionable[0].reason
+
+
+def test_between_6_and_12_months_with_enough_activity_still_exempt():
+    """경계 케이스 — cutoff 와 hard_cutoff 사이에 있고 활동 충분 → 면제."""
+    counter = _FakeActivityCounter(counts={"u": (5, 5)})
+    svc = _service(activity_counter=counter)
+    # hard_cutoff=2025-07-01. last_login=2025-08-01 → 7월 1일 이후라 1년 컷오프
+    # 안 걸림. cutoff=2026-01-01 이전이라 6개월 컷오프는 걸림.
+    members = [_make_member("u", 5, last_login=date(2025, 8, 1))]
+    plan = svc.build_plan(members=members)
+    assert plan.actionable == []
+
+
+def test_hard_cutoff_boundary_inclusive():
+    """last_login == hard_cutoff 인 회원 — 1년 컷오프에 포함됨."""
+    counter = _FakeActivityCounter(counts={"u": (10, 10)})
+    svc = _service(activity_counter=counter, hard_cutoff=date(2025, 7, 1))
+    members = [_make_member("u", 5, last_login=date(2025, 7, 1))]
+    plan = svc.build_plan(members=members)
+    actionable = plan.actionable
+    assert len(actionable) == 1, "경계값(=hard_cutoff) 도 1년+ 그룹으로 포함"
+    assert "12개월 초과" in actionable[0].reason
+
+
+def test_hard_cutoff_off_by_one_day_still_exempt_with_activity():
+    """last_login 이 hard_cutoff 보다 하루 늦으면 6~12개월 그룹 → 활동 면제 가능."""
+    counter = _FakeActivityCounter(counts={"u": (10, 10)})
+    svc = _service(activity_counter=counter, hard_cutoff=date(2025, 7, 1))
+    members = [_make_member("u", 5, last_login=date(2025, 7, 2))]
+    plan = svc.build_plan(members=members)
+    assert plan.actionable == []
+
+
+def test_one_year_plus_without_activity_counter_still_adjusts():
+    """activity_counter 미주입(legacy) 시에도 1년 이상 미접속자는 조정 대상."""
+    svc = _service(activity_counter=None)
+    members = [_make_member("u", 5, last_login=date(2024, 12, 1))]
+    plan = svc.build_plan(members=members)
+    actionable = plan.actionable
+    assert len(actionable) == 1
+    # activity_counter 가 없으므로 사유에 "12개월 초과" 가 들어가더라도 활동량 부기는 없다.
+    assert "12개월 초과" in actionable[0].reason
+    assert "green3" not in actionable[0].reason
