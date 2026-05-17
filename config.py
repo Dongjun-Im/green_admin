@@ -50,8 +50,15 @@ GREEN3_SEARCH_URL = f"{SORISEM_BASE_URL}/bbs/board.php?bo_table={GREEN3_BOARD}&c
 QNA_BOARD = "green9"
 QNA_SEARCH_URL = f"{SORISEM_BASE_URL}/bbs/board.php?bo_table={QNA_BOARD}&cl=green"
 
+# 시리즈 및 정보 게시판 (v1.2.8: 회원 검색 화면 활동량 표시용)
+SERIES_BOARD = "green7"
+
 # 활동점수·MVP 산정 시 사용할 게시판 목록 (글·댓글 모두)
 ACTIVITY_BOARDS = (GREEN3_BOARD, QNA_BOARD)
+
+# 회원 검색(Ctrl+F) 다이얼로그에서 '활동량 불러오기' 시 조회할 게시판.
+# 우리들의 이야기 + 시리즈/정보 + 질문게시판 — 세 곳의 글·댓글 수를 보여 준다.
+SEARCH_DIALOG_BOARDS = (GREEN3_BOARD, SERIES_BOARD, QNA_BOARD)
 
 # 메일 발송 엔드포인트 (/message/write.php, POST multipart)
 MAIL_WRITE_URL = f"{SORISEM_BASE_URL}/message/write.php"

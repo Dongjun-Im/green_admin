@@ -14,7 +14,16 @@ from typing import Optional
 import requests
 import wx
 
-from config import LEVEL_LABELS, SELECTABLE_LEVELS, WITHDRAW_LEVEL
+from config import (
+    GREEN3_BOARD,
+    LEVEL_LABELS,
+    QNA_BOARD,
+    SEARCH_DIALOG_BOARDS,
+    SELECTABLE_LEVELS,
+    SERIES_BOARD,
+    WITHDRAW_LEVEL,
+)
+from core.activity_counter import ActivityCounter
 from core.admin_flags import AdminFlagsStore
 from core.member_admin import MemberAdminAdapter
 from core.member_notes import MemberNotesStore
@@ -23,6 +32,21 @@ from screen_reader import speak
 from ui.item_text_ctrl import ItemTextCtrl
 from ui.level_change_dialog import LevelChangeDialog
 from ui.member_note_dialog import MemberNoteDialog
+from ui.progress_dialog import ProgressTaskDialog
+
+
+# v1.2.8: 회원 검색 화면 활동량 표시용 — 게시판 코드 → 짧은 라벨(목록 행 압축)
+# / 긴 라벨(상세 패널) 매핑. 게시판이 늘면 여기에 한 줄 추가.
+_BOARD_SHORT_LABELS = (
+    (GREEN3_BOARD, "G3"),
+    (SERIES_BOARD, "G7"),
+    (QNA_BOARD, "G9"),
+)
+_BOARD_LONG_LABELS = (
+    (GREEN3_BOARD, "green3 (우리들의 이야기)"),
+    (SERIES_BOARD, "green7 (시리즈/정보)"),
+    (QNA_BOARD, "green9 (질문게시판)"),
+)
 
 
 # 등급 필터 — 사이트 cl_level 매핑 (4=준,5=일반,6=우수,7=최우수,8=명예).
@@ -73,6 +97,10 @@ class MemberSearchDialog(wx.Dialog):
         self.changed_count: int = 0
         # 등급 필터 — None = 전체, "기타" = 5~9 외, 정수 = 해당 레벨만
         self._level_filter: Optional[int | str] = None
+        # v1.2.8: '활동량 불러오기' 결과 캐시. 이 다이얼로그 한 번 띄운 동안
+        # 유지 — 다음 Ctrl+F 때는 다시 비어 있다 (영구 저장 없음).
+        # key: user_id → {board: (posts, comments)}
+        self._activity_cache: dict[str, dict[str, tuple[int, int]]] = {}
 
         self._build_ui()
         # v1.0.5: 7개 버튼이 가로로 들어가 잘리는 일이 없도록 최소 폭 확대.
@@ -185,6 +213,21 @@ class MemberSearchDialog(wx.Dialog):
             secondary_sizer.Add(b, 1, wx.ALL | wx.EXPAND, 4)
         sizer.Add(secondary_sizer, 0, wx.EXPAND | wx.ALL, 4)
 
+        # v1.2.8: green3·green7·green9 글·댓글을 한 번에 받아와 캐시하는 버튼.
+        # 회원당 6회 HTTP 요청이라 전체 명단 자동 조회는 안 함 — 사용자가 필터로
+        # 좁힌 뒤 누르도록.
+        activity_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        self.load_activity_btn = wx.Button(
+            panel, wx.ID_ANY, "활동량 불러오기 (green3·7·9 글·댓글) (F5)(&I)",
+        )
+        self.load_activity_btn.SetToolTip(
+            "현재 필터에 보이는 회원들의 green3·green7·green9 게시판 글·댓글 수를 "
+            "받아와 목록과 상세에 표시합니다. 회원당 6회 HTTP 요청이라 명단이 크면 "
+            "오래 걸릴 수 있습니다. 단축키: F5"
+        )
+        activity_sizer.Add(self.load_activity_btn, 1, wx.ALL | wx.EXPAND, 4)
+        sizer.Add(activity_sizer, 0, wx.EXPAND | wx.ALL, 4)
+
         panel.SetSizer(sizer)
 
         self.search_input.Bind(wx.EVT_TEXT, self._on_search_change)
@@ -202,6 +245,7 @@ class MemberSearchDialog(wx.Dialog):
         self.uncheck_all_btn.Bind(wx.EVT_BUTTON, self._on_uncheck_all)
         self.admin_toggle_btn.Bind(wx.EVT_BUTTON, self._on_admin_toggle)
         self.note_btn.Bind(wx.EVT_BUTTON, self._on_note)
+        self.load_activity_btn.Bind(wx.EVT_BUTTON, self._on_load_activity)
         close_btn.Bind(wx.EVT_BUTTON, lambda e: self.EndModal(wx.ID_CLOSE))
         self.Bind(wx.EVT_CHAR_HOOK, self._on_char_hook)
 
@@ -216,6 +260,7 @@ class MemberSearchDialog(wx.Dialog):
         check_all_id = self.check_all_btn.GetId()
         uncheck_id = self.uncheck_all_btn.GetId()
         withdraw_id = self.withdraw_btn.GetId()
+        load_activity_id = self.load_activity_btn.GetId()
         accels = [
             (wx.ACCEL_CTRL, ord("B"), bulk_id),
             (wx.ACCEL_NORMAL, wx.WXK_F2, bulk_id),
@@ -226,6 +271,8 @@ class MemberSearchDialog(wx.Dialog):
             (wx.ACCEL_ALT, ord("U"), uncheck_id),
             (wx.ACCEL_ALT, ord("M"), admin_id),
             (wx.ACCEL_ALT, ord("W"), withdraw_id),
+            (wx.ACCEL_NORMAL, wx.WXK_F5, load_activity_id),
+            (wx.ACCEL_ALT, ord("I"), load_activity_id),
         ]
         self.SetAcceleratorTable(wx.AcceleratorTable(accels))
 
@@ -299,10 +346,34 @@ class MemberSearchDialog(wx.Dialog):
 
         note = self._notes_cache.get(m.user_id)
         marker = " ★" if note and note.has_content else ""
+        # v1.2.8: 활동량 캐시가 있으면 한 줄 끝에 "G3 글/댓글 G7 글/댓글 G9 글/댓글" 추가.
+        # 캐시 없으면 행을 짧게 유지 (전체 명단 자동 조회는 비용이 커서 사용자 트리거).
+        activity_summary = self._format_activity_summary_short(m.user_id)
+        # 마지막 접속일도 행에 같이 보여 — 사용자가 "접속일도 함께" 요청.
+        last = (
+            m.last_login_date.isoformat()
+            if m.last_login_date else "접속일 ?"
+        )
         return (
             f"{check_mark} {m.user_id} / {m.name} / {m.nickname} / "
-            f"{level_part}{marker}"
+            f"{level_part}{marker} / 접속 {last}{activity_summary}"
         )
+
+    def _format_activity_summary_short(self, user_id: str) -> str:
+        """목록 행에 붙일 짧은 활동량 요약. 캐시 미수집이면 빈 문자열."""
+        cached = self._activity_cache.get(user_id)
+        if not cached:
+            return ""
+        parts = []
+        for board, label in _BOARD_SHORT_LABELS:
+            counts = cached.get(board)
+            if counts is None:
+                continue
+            posts, comments = counts
+            parts.append(f"{label} 글{posts} 댓{comments}")
+        if not parts:
+            return ""
+        return " / " + " ".join(parts)
 
     def _apply_filters(self) -> None:
         """검색어 + 등급 필터를 동시에 적용해 self.filtered 와 list_box 를 갱신."""
@@ -408,6 +479,19 @@ class MemberSearchDialog(wx.Dialog):
             f"가입일: {join}",
             f"접속수: {m.login_count if m.login_count is not None else '알 수 없음'}",
         ]
+        # v1.2.8: 활동량 캐시가 있으면 게시판별 글·댓글 수 한 줄씩 추가.
+        cached = self._activity_cache.get(m.user_id)
+        if cached:
+            for board, long_label in _BOARD_LONG_LABELS:
+                counts = cached.get(board)
+                if counts is None:
+                    continue
+                posts, comments = counts
+                lines.append(f"{long_label}: 글 {posts}건 / 댓글 {comments}건")
+        else:
+            lines.append(
+                "활동량(green3·7·9): 아직 안 불러옴 — F5 또는 '활동량 불러오기' 버튼"
+            )
         note = self._notes_cache.get(m.user_id)
         if note and note.has_content:
             if note.tags:
@@ -614,6 +698,107 @@ class MemberSearchDialog(wx.Dialog):
             "동호회관리자 표시 토글",
             wx.OK | wx.ICON_INFORMATION,
         )
+
+    # ---------- 활동량 불러오기 (v1.2.8) ----------
+
+    def _on_load_activity(self, event=None) -> None:
+        """현재 필터에 보이는 회원들의 green3·green7·green9 글·댓글 수를 받아 캐시.
+
+        회원당 6회 HTTP 요청 — 명단이 크면 오래 걸리니 진행률 다이얼로그로 보여 줌.
+        취소 가능. 이미 캐시에 있는 회원은 건너뛴다.
+        """
+        speak("활동량 불러오기")
+        if self.session is None:
+            speak("로그인 세션이 없어 활동량을 불러올 수 없습니다.")
+            self._modal_msg(
+                "로그인 세션이 없어 활동량을 불러올 수 없습니다.\n"
+                "한 번 로그아웃 후 다시 로그인하면 해결됩니다.",
+                "세션 없음", wx.ICON_WARNING,
+            )
+            return
+        if not self.filtered:
+            speak("불러올 회원이 없습니다.")
+            self._modal_msg(
+                "현재 필터에 보이는 회원이 없어 불러올 게 없습니다.",
+                "회원 없음", wx.ICON_INFORMATION,
+            )
+            return
+
+        targets = [m for m in self.filtered if m.user_id not in self._activity_cache]
+        already = len(self.filtered) - len(targets)
+        if not targets:
+            speak(f"이미 {already}명 모두 캐시에 있습니다.")
+            self._modal_msg(
+                f"현재 보이는 {len(self.filtered)}명 모두 이미 활동량을 불러와 둔 상태입니다.",
+                "이미 불러옴", wx.ICON_INFORMATION,
+            )
+            return
+
+        # 큰 명단 경고 (회원당 6회 요청 × N명)
+        if len(targets) >= 50:
+            est_seconds = len(targets) * 6 * 0.3  # 요청당 평균 0.3초 가정
+            est_min = max(1, int(est_seconds / 60))
+            confirm = wx.MessageBox(
+                f"{len(targets)}명의 활동량을 불러오려면 약 {est_min}분 정도 걸릴 수 있습니다.\n"
+                f"(회원당 6회 HTTP 요청)\n\n"
+                "필터를 좁힌 뒤 다시 시도하시는 게 좋을 수 있습니다.\n"
+                "그래도 계속하시겠습니까?",
+                "긴 작업 확인",
+                wx.YES_NO | wx.ICON_QUESTION | wx.NO_DEFAULT,
+            )
+            if confirm != wx.YES:
+                speak("취소했습니다.")
+                return
+
+        counter = ActivityCounter(self.session, boards=SEARCH_DIALOG_BOARDS)
+        total = len(targets)
+
+        def worker(progress_cb):
+            results: dict[str, dict[str, tuple[int, int]]] = {}
+            for i, m in enumerate(targets, start=1):
+                progress_cb(i, total, f"활동량 조회 {i}/{total} — {m.user_id}")
+                try:
+                    ma = counter.fetch_member(m.user_id)
+                except Exception:
+                    # 한 회원 실패해도 다음으로 넘어감 — 해당 회원만 캐시 미반영.
+                    continue
+                board_data: dict[str, tuple[int, int]] = {}
+                for board, ba in ma.by_board.items():
+                    board_data[board] = (ba.posts, ba.comments)
+                results[m.user_id] = board_data
+            return results
+
+        dlg = ProgressTaskDialog(
+            self,
+            title="활동량 불러오기 (green3·green7·green9)",
+            task=worker,
+            message=f"{total}명의 글·댓글 수를 받는 중...",
+            can_cancel=True,
+        )
+        try:
+            dlg.run_modal()
+            err = dlg.error
+            results = dlg.result
+        finally:
+            dlg.Destroy()
+
+        if err is not None:
+            self._modal_msg(
+                f"활동량 불러오기 실패: {err}",
+                "오류", wx.ICON_ERROR,
+            )
+            return
+        if not results:
+            speak("받아 온 데이터가 없습니다.")
+            return
+
+        self._activity_cache.update(results)
+        # 캐시가 채워졌으니 목록 행과 현재 선택된 상세 패널을 모두 다시 그린다.
+        self._refresh_all_entries()
+        sel = self.list_box.GetSelection()
+        if sel >= 0:
+            self._update_detail(sel)
+        speak(f"{len(results)}명 활동량을 불러왔습니다.")
 
     # ---------- 메모/태그 ----------
 
