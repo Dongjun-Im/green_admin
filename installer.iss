@@ -8,7 +8,7 @@
 ;   (build_release.py 가 1)+2) 와 무설치 ZIP 까지 한 번에 해 줌)
 
 #define AppName          "초록등대 회원관리"
-#define AppVersion       "1.2.7"
+#define AppVersion       "1.2.8"
 #define AppPublisher     "초록등대 동호회"
 #define AppExeName       "초록등대회원관리.exe"
 #define SourceDir        "dist\초록등대회원관리"

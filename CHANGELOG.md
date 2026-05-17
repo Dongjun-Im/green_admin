@@ -1,5 +1,28 @@
 # CHANGELOG
 
+## v1.2.8 (2026-05-17)
+
+회원 검색(Ctrl+F) 다이얼로그에 게시판 활동량 + 마지막 접속일 표시 추가.
+
+### 추가 — 회원 검색에 green3·green7·green9 글·댓글 보기
+- 결과 목록 한 줄에 마지막 접속일이 같이 보입니다 ("접속 YYYY-MM-DD").
+- 'F5' 또는 '활동량 불러오기' 버튼을 누르면, 지금 필터에 보이는 회원들의 우리들의
+  이야기(green3) / 시리즈·정보(green7) / 질문게시판(green9) 글·댓글 수를 한 번에
+  받아 옵니다. 진행률 게이지 + 상승 비프음 표시, 취소 가능.
+- 받아 온 뒤 목록 행 끝에 "G3 글5 댓12 G7 글0 댓3 G9 글2 댓0" 짧은 요약, 상세
+  패널에는 게시판 이름과 함께 한 줄씩 표시.
+- 다이얼로그를 열어 둔 동안 캐시 유지 — 같은 회원을 다시 누르면 즉시 보임. 닫으면
+  캐시 비워짐. 50명 이상 받을 때는 예상 시간을 미리 알리고 Yes/No 확인.
+
+### 코드 / 테스트
+- `config.py` — `SERIES_BOARD = "green7"` + `SEARCH_DIALOG_BOARDS = (green3, 7, 9)`.
+- `ui/search_dialog.py` — `_activity_cache` dict + `_format_activity_summary_short`
+  + `_on_load_activity` (ProgressTaskDialog + ActivityCounter 활용) + F5/Alt+I 액셀러레이터.
+- `ui/manual_dialog.py` + 동봉 매뉴얼 TXT — '회원 찾기' 챕터에 사용법 추가.
+- `tests/test_search_dialog_activity.py` 신규 6개: 게시판 라벨, 빈 캐시·세 게시판·
+  부분 캐시·다른 사용자·SEARCH_DIALOG_BOARDS 순서. 총 509/509 통과.
+
+
 ## v1.2.7 (2026-05-16)
 
 장기미접속 등급 조정의 판정 기준 보강 + 미리보기 화면 정보 추가.
