@@ -94,6 +94,8 @@ a = Analysis(
         'core.dashboard_summary',
         # core 패키지 — 구독 만료 조기 알림 (v1.2.11)
         'core.expiry_reminder',
+        # core 패키지 — 헤드리스 작업 스케줄러 (v1.2.11)
+        'core.scheduler_runner',
         # core 패키지 — 자료실 구독비 관리
         'core.toss_xlsx',
         'core.payment_store',
