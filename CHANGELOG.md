@@ -1,5 +1,53 @@
 # CHANGELOG
 
+## v1.2.10 (2026-05-17)
+
+장기미접속 판정에 1년 안전 상한 추가 + 안내 메일 두 종류(자동 추림) + 미리보기 표시 강화.
+
+### 추가 — 안내 메일 자동 추림·발송 (rtgreen 전용)
+- 작업 메뉴 → '활동 안내 메일 (green3 6개월 글 없음)': '우리들의 이야기' 게시판에
+  최근 6개월간 글이 0건인 회원을 자동으로 찾아 한 번에 안내 메일 발송. 댓글은
+  카운트하지 않음 (사용자 요청대로 '게시물' 기준).
+- 작업 메뉴 → '장기미접속 사전 경고 메일 (1년+ 미접속)': 마지막 접속이 1년 넘게
+  지난 회원에게 '다음 정리 작업에서 등급이 조정될 수 있다' 사전 경고.
+- 두 메일 모두 한 번 보낸 회원은 30일 이내 자동 제외 (`data/nudge_history.json`).
+- 대상 회원 미리보기 + 본문 미리보기 + 스페이스 체크 해제로 일부만 보내기 가능.
+- 발송 진행률 게이지 + 상승 비프음. 발송은 회원별 개별 모드(수신자 ID 비노출).
+- 신규 모듈: `core/nudge_history.py`, `core/nudge_mail.py`, `ui/nudge_dialog.py`.
+- 기존 인프라 그대로 재사용: `MailSender` (rtgreen 전용 발송) + `ActivityCounter`
+  (`fetch_post_count` 공개 헬퍼 신규 추가) + `ProgressTaskDialog`.
+
+### 변경 — 장기미접속 판정에 1년 안전 상한
+- 6개월 미접속이지만 green3 게시판 글 3건·댓글 3건 이상 남긴 회원은 '접속자'로
+  인정해 면제하던 v1.2.7 규칙에 안전 상한 추가: **1년 이상 미접속이면 활동량과
+  무관하게 등급 조정 대상**. (게시판으로만 활동하고 사이트 자체에는 1년 넘게
+  안 들어오는 계정은 '관리되지 않는 계정' 으로 봄.)
+- `config.py:INACTIVITY_MONTHS_HARD = 12` 추가.
+- `core/level_adjustment.py:LevelAdjustmentService` — `hard_cutoff_provider` 생성자
+  인자 추가. 후보가 1년+ 미접속이면 사유에 "12개월 초과 — 활동량 무관" 명시.
+
+### 추가 — 장기미접속 미리보기에 활동 정보
+- `AdjustmentItem` 에 `green3_posts` / `green3_comments` 필드 (Optional[int]).
+  미리보기 목록 한 줄 끝에 "마지막접속 YYYY-MM-DD / 글 N건 / 댓글 M건" 표시.
+- `ui/confirm_dialog.py` 상세 패널에 "green3 활동: 글 N건 / 댓글 M건" 줄 추가.
+
+### 추가 — 회원 검색(Ctrl+F)에 게시판 활동량
+- 결과 목록 한 줄에 마지막 접속일이 같이 보임 ("접속 YYYY-MM-DD").
+- 'F5' 또는 '활동량 불러오기' 버튼: green3 + green7 + green9 글·댓글 수를 한
+  번에 받아옴 ("G3 글5 댓12 G7 글0 댓3 G9 글2 댓0" 짧은 요약 + 상세 패널에
+  게시판 한 줄씩). 다이얼로그 열려 있는 동안 캐시, 닫으면 비워짐.
+- `config.py:SERIES_BOARD = "green7"` + `SEARCH_DIALOG_BOARDS` 튜플.
+
+### 매뉴얼
+- `ui/manual_dialog.py` + 동봉 매뉴얼 TXT — '회원 찾기' / '오래 안 들어온 회원
+  등급 조정' / '메일 보내기' 챕터 업데이트. 6~12개월 / 1년+ 두 분기 판정 기준,
+  F5 활동량 불러오기, 안내 메일 두 종류 사용법 명시.
+
+### 테스트
+- 신규 31개 (level_adjustment 6 + search_dialog_activity 6 + 모델 5 + nudge_history 9
+  + nudge_mail 11). 기존 화면 회귀 12개 보정. 총 pytest **540/540 통과**.
+
+
 ## v1.2.9 (2026-05-17)
 
 자동 업데이트의 '지금 설치' 흐름을 **클릭 없이** 진행되도록 무인(silent) 설치로 전환.
