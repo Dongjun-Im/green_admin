@@ -26,6 +26,7 @@ from core.activity_counter import ActivityCounter
 from core.backup_retention import DEFAULT_RETENTION_MONTHS, archive_old_backups
 from core.backup_service import BackupService
 from core.crawler import MemberCrawler
+from core.dashboard_summary import build_dashboard_lines
 from core.html_report import default_report_path, write_report
 from core.keybindings import (
     KEYBINDINGS_FILE,
@@ -319,6 +320,18 @@ class MainFrame(wx.Frame):
         title.SetFont(font)
         sizer.Add(title, 0, wx.ALL, 10)
 
+        # v1.2.11: 운영자 대시보드 — 오늘 처리할 일이 한눈에 보이도록.
+        # 빈 줄로 시작했다가 _refresh_dashboard() 가 채움.
+        dashboard_label = wx.StaticText(panel, label="오늘 해야 할 일(&O):")
+        sizer.Add(dashboard_label, 0, wx.LEFT | wx.RIGHT | wx.TOP, 10)
+        self.dashboard_text = ItemTextCtrl(
+            panel,
+            value="",
+            style=wx.TE_READONLY | wx.TE_MULTILINE,
+            name="오늘 해야 할 일",
+        )
+        sizer.Add(self.dashboard_text, 0, wx.EXPAND | wx.ALL, 10)
+
         info_label = wx.StaticText(panel, label="현재 상태(&S):")
         sizer.Add(info_label, 0, wx.LEFT | wx.RIGHT, 10)
 
@@ -394,6 +407,36 @@ class MainFrame(wx.Frame):
             f"마지막 MVP:  {last_m or '기록 없음'}   다음 MVP:  {m_due}"
         )
         self.status_text.SetValue(text)
+        self._refresh_dashboard()
+
+    def _refresh_dashboard(self) -> None:
+        """대시보드 '오늘 해야 할 일' 위젯을 갱신 (v1.2.11).
+
+        회원 캐시·가입 대기 카운트는 가능한 만큼만 쓰고, 없으면 'N/A' 로 표시.
+        주기적 갱신은 안 함 — _refresh_status 가 호출될 때마다 같이 갱신.
+        """
+        widget = getattr(self, "dashboard_text", None)
+        if widget is None:
+            return
+        members = self._cached_members
+        pending_count: int | None = None
+        if members is not None:
+            try:
+                from core.pending_members import find_pending
+                pending = find_pending(
+                    members, seen_store=self.pending_seen,
+                    blocklist=self.inactivity_blocklist,
+                )
+                pending_count = len(pending)
+            except Exception:
+                pending_count = None
+        lines = build_dashboard_lines(
+            tracker=self.tracker,
+            members=members,
+            pending_count=pending_count,
+            admin_user_id=self.admin_user_id,
+        )
+        widget.SetValue("\n".join(lines))
 
     # ---------- 키보드 ----------
 

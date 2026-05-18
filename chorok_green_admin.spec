@@ -90,6 +90,8 @@ a = Analysis(
         # core 패키지 — 안내 메일 (v1.2.10)
         'core.nudge_history',
         'core.nudge_mail',
+        # core 패키지 — 운영자 대시보드 (v1.2.11)
+        'core.dashboard_summary',
         # core 패키지 — 자료실 구독비 관리
         'core.toss_xlsx',
         'core.payment_store',
