@@ -1,5 +1,42 @@
 # CHANGELOG
 
+## v1.3.1 (2026-05-19)
+
+### 추가 — 자동 스케줄러 관리 GUI
+- 작업 메뉴 → '자동 스케줄러 관리(&Y)...' 항목 신규. 네 가지 자동 작업
+  (활동 안내·장기미접속 경고·구독 만료 7/3일 알림) 의 등록 상태를 한 화면에서
+  보고 등록·해제·새로고침 가능. 이제 PowerShell 명령 없이도 GUI 로 설정.
+- 다이얼로그: 줄 맨 앞에 `[V]` 등록됨 / `[ . ]` 미등록 마커 + 다음 실행 시각
+  + 마지막 결과 코드를 상세 패널에 표시. 선택 등록 / 선택 해제 / 모두 등록 /
+  모두 해제 / 새로고침 / 닫기 6개 버튼.
+
+### 코드 구조
+- `core/scheduler_setup.py` 신규 — schtasks.exe 래퍼 (register_task /
+  unregister_task / query_status / TaskStatus / DEFAULT_SCHEDULES). CLI(tools/)
+  와 UI(ui/) 가 모두 같은 함수를 호출.
+- `tools/register_scheduler.py` — 비즈니스 로직을 core/ 로 이전. argparse +
+  출력 포맷팅만 담당하는 얇은 CLI 래퍼로 정리.
+- `ui/scheduler_dialog.py` 신규 — SchedulerDialog.
+- `ui/main_frame.py` — ID_SCHEDULER_SETUP + 메뉴 항목 + on_scheduler_setup 핸들러.
+
+### 매뉴얼
+- 신규 챕터 '자동 스케줄러 (정해진 시각에 자동 실행)' — 무엇을 자동으로 하는지,
+  기본 권장 시각, GUI/CLI 등록 방법, 전제(rtgreen·2FA·PC 켜짐), 로그 파일
+  위치, 해제·재등록 절차. '프로그램 업데이트' 와 '단축키 한눈에 보기' 사이.
+
+### 빌드
+- `chorok_green_admin.spec` hiddenimports 에 core.scheduler_setup /
+  ui.scheduler_dialog 추가.
+
+### 테스트 (11 신규, 총 pytest 583/583 통과)
+- register_task: 미지원 작업 키 거부 / schtasks 인자 구성 (TN, Create, /D
+  modifier for MONTHLY, no /D for DAILY) / schtasks 실패 시 메시지 전파.
+- unregister_task: /Delete /TN ChorokGreenAdmin_<key>.
+- query_status: schtasks 샘플 출력 파싱 — 등록·미등록 작업 분류, 다음 실행·
+  마지막 결과 추출, 무관한 작업 무시, schtasks 실패 폴백.
+- DEFAULT_SCHEDULES 키 ↔ scheduler_runner.ALL_TASKS 일관성 (회귀 보호).
+
+
 ## v1.3.0 (2026-05-19)
 
 자동화·요약 라운드 — 운영자가 컴퓨터를 켜고 메뉴를 누르지 않아도 정기 업무가
