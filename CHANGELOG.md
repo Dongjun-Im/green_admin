@@ -1,5 +1,62 @@
 # CHANGELOG
 
+## v1.3.0 (2026-05-19)
+
+자동화·요약 라운드 — 운영자가 컴퓨터를 켜고 메뉴를 누르지 않아도 정기 업무가
+돌아가도록.
+
+### 추가 — 운영자 대시보드 (메인 화면 상단)
+- 타이틀 바로 아래 "오늘 해야 할 일(&O):" 박스 — 도래·임박 작업(백업/조정/MVP),
+  신규 가입 대기 회원 수, 장기미접속 후보 예상 수가 한눈에. `_refresh_status` 가
+  호출될 때마다 자동 갱신. 회원 목록 캐시가 없으면 'Ctrl+F 한 번 열면 채워집니다'
+  안내.
+- `core/dashboard_summary.py:build_dashboard_lines` 순수 함수 — wx 의존 없이
+  텍스트 라인 리스트 반환. tracker 메서드가 던져도 대시보드 자체는 안 죽음.
+
+### 추가 — 자료실 구독 만료 조기 알림 메일
+- 작업 메뉴 → '자료실 구독 만료 알림 — 7일 전(&7)' / '— 3일 전(&3)': 정확히
+  N일 후 구독이 만료될 회원을 자동으로 찾아 한 번에 안내 메일 발송.
+- 같은 만료일에 같은 종류의 메일은 한 번만 (재구독 시 새 만료일에는 다시 발송).
+- `core/expiry_reminder.py` + `ui/expiry_reminder_dialog.py` 신규.
+- `NudgeHistoryStore.was_sent_for(user_id, kind, target_date)` 정확 매칭 메서드 추가.
+
+### 추가 — 자동 스케줄러 (Windows 작업 스케줄러 연동)
+- `초록등대회원관리.exe --task <name>` 헤드리스 모드 — UI 없이 한 작업만
+  수행하고 종료. 지원 작업: `activity_nudge` / `inactive_warning` /
+  `expiry_remind_7` / `expiry_remind_3`.
+- `core/scheduler_runner.py:run_task(name)` — green_auth 저장 자격증명 자동
+  로그인 → 권한 체크 → 작업 디스패치 → `data/logs/scheduler_<task>_YYYYMM.log`
+  기록. 메일 작업은 'rtgreen' 아이디일 때만 실제 발송 (MailSender 안전 장치).
+- `tools/register_scheduler.py` 신규 — `schtasks.exe` 로 작업 등록/해제/조회.
+  네 작업의 권장 시각: 활동/장기미접속 월 1회, 구독 만료 매일 09:00.
+
+### 수정 — 메인 화면 버튼 클릭이 안 잡히던 버그
+- `_build_menu` 의 `self.Bind(wx.EVT_MENU, ..., id=ID_BACKUP_NOW)` 등은 메뉴
+  항목에만 적용된다. 같은 ID 를 가진 panel 의 `wx.Button` 을 클릭하면
+  `EVT_BUTTON` 이벤트가 발생하지만 핸들러가 없어 무시됐음.
+- `_build_ui` 끝에서 같은 핸들러를 `EVT_BUTTON` 으로도 바인딩 — 메뉴·단축키·
+  버튼 모두 작동. 우수회원 백업/장기미접속 조정/마지막 작업 정보 3개 버튼.
+
+### 매뉴얼
+- `ui/manual_dialog.py` + 동봉 매뉴얼 TXT — '메일 보내기' 챕터에 구독 만료
+  알림 + 자동 스케줄러 등록 방법 단락 추가.
+
+### 빌드
+- `chorok_green_admin.spec` hiddenimports 에 `core.dashboard_summary` /
+  `core.expiry_reminder` / `core.scheduler_runner` / `ui.expiry_reminder_dialog`
+  추가.
+
+### 테스트 (총 pytest 572/572 통과, 신규 32)
+- `tests/test_dashboard_summary.py` 10: 도래/임박/없음, pending None/0/양수,
+  본인·관리자 제외, tracker 예외 안전.
+- `tests/test_expiry_reminder.py` 13: 정확히 N일 후 만료자, 본인·관리자 제외,
+  history 중복 차단(같은 period_to 는 한 번만, 다른 period_to 는 재발송),
+  payment_store 예외 스킵, 템플릿 7/3 차이, was_sent_for 매칭.
+- `tests/test_scheduler_runner.py` 9: 미지원 작업 키, 대상 0명 시 정상 success,
+  발송+history 기록, MailSender disabled 시 skipped 집계, log_event 기록,
+  ALL_TASKS 일관성, main._parse_args 분기.
+
+
 ## v1.2.10 (2026-05-17)
 
 장기미접속 판정에 1년 안전 상한 추가 + 안내 메일 두 종류(자동 추림) + 미리보기 표시 강화.
