@@ -40,6 +40,8 @@ data/admin_flags.json
 data/inactivity_withdrawn.json
 # 자료실(NAS) 접속 로그 — 회원 IP·접속·파일 동작 기록 포함 (개인정보)
 data/nas_access_log.db
+# 안내 메일 발송 이력 — 회원별 발송일 기록 (v1.2.10, 30일 중복 방지용)
+data/nudge_history.json
 
 # Sensitive user credentials (if green_auth writes here)
 data/credentials.ini

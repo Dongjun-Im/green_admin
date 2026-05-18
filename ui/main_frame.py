@@ -17,6 +17,7 @@ from config import (
     APP_NAME,
     APP_VERSION,
     BACKUPS_DIR,
+    DATA_DIR,
     DUMPS_DIR,
     LOGS_DIR,
 )
@@ -43,6 +44,7 @@ from core.mail_sender import (
 )
 from core.member_admin import MemberAdminAdapter
 from core.member_parser import EmptyParseError, MemberListParser
+from core.nudge_history import NudgeHistoryStore
 from core.site_diagnostics import diagnose_admin_member_html
 from core.update_check import check_for_updates, download_release_asset
 from core.models import AdjustmentPlan, AdjustmentReport, BackupResult
@@ -65,6 +67,7 @@ from ui.mail_dialog import ManualMailDialog
 from ui.mvp_dialog import MvpDialog
 from ui.board_dialog import BoardAdminDialog
 from ui.nas_log_dialog import NasLogDialog
+from ui.nudge_dialog import NudgeMailDialog
 from ui.payment_dialog import PaymentDialog
 from ui.pending_member_dialog import PendingMemberDialog
 from ui.progress_dialog import ProgressTaskDialog
@@ -126,6 +129,9 @@ ID_PAYMENTS = wx.NewIdRef()
 ID_TOGGLE_AUTO_ADJUST = wx.NewIdRef()
 ID_BOARD_ADMIN = wx.NewIdRef()
 ID_NAS_LOG = wx.NewIdRef()
+# v1.2.10: 안내 메일(nudge) — green3 6개월 글 없음 / 1년+ 미접속 경고.
+ID_NUDGE_ACTIVITY = wx.NewIdRef()
+ID_NUDGE_INACTIVE_WARN = wx.NewIdRef()
 
 
 class MainFrame(wx.Frame):
@@ -160,6 +166,10 @@ class MainFrame(wx.Frame):
         self.level_history = LevelHistoryStore()
         # 장기미접속으로 '탈퇴' 처리된 회원 명단 — 재가입 시 승인 자동 차단
         self.inactivity_blocklist = WithdrawnBlocklist()
+        # v1.2.10: 안내 메일(nudge) 발송 이력 — 30일 이내 중복 발송 방지용.
+        self.nudge_history = NudgeHistoryStore(
+            Path(DATA_DIR) / "nudge_history.json"
+        )
 
         self._build_menu()
         self._build_ui()
@@ -221,6 +231,14 @@ class MainFrame(wx.Frame):
             ID_MANUAL_MAIL,
             "수동 메일 발송 (rtgreen 전용)(&M)\tCtrl+M",
         )
+        task_menu.Append(
+            ID_NUDGE_ACTIVITY,
+            "활동 안내 메일 (green3 6개월 글 없음)(&V)...",
+        )
+        task_menu.Append(
+            ID_NUDGE_INACTIVE_WARN,
+            "장기미접속 사전 경고 메일 (1년+ 미접속)(&E)...",
+        )
         task_menu.Append(ID_PAYMENTS, "자료실 구독비 관리(&P)...\tCtrl+P")
         task_menu.Append(ID_NAS_LOG, "자료실 접속 로그(&L)...")
         task_menu.Append(ID_BOARD_ADMIN, "게시판 관리 / 공지 작성(&W)...")
@@ -279,6 +297,8 @@ class MainFrame(wx.Frame):
         self.Bind(wx.EVT_MENU, self.on_payments, id=ID_PAYMENTS)
         self.Bind(wx.EVT_MENU, self.on_nas_log, id=ID_NAS_LOG)
         self.Bind(wx.EVT_MENU, self.on_board_admin, id=ID_BOARD_ADMIN)
+        self.Bind(wx.EVT_MENU, self.on_nudge_activity, id=ID_NUDGE_ACTIVITY)
+        self.Bind(wx.EVT_MENU, self.on_nudge_inactive_warn, id=ID_NUDGE_INACTIVE_WARN)
         self.Bind(wx.EVT_MENU, self.on_toggle_auto_adjust, id=ID_TOGGLE_AUTO_ADJUST)
         self.Bind(wx.EVT_MENU, self._on_close, id=wx.ID_EXIT)
 
@@ -553,6 +573,55 @@ class MainFrame(wx.Frame):
         )
         dlg.ShowModal()
         dlg.Destroy()
+
+    # ---------- 안내 메일 (v1.2.10) ----------
+
+    def _open_nudge_dialog(self, kind: str) -> None:
+        """공통 진입점 — green3 활동 안내 + 장기미접속 경고 둘 다 같은 다이얼로그.
+
+        회원 목록 캐시가 없으면 먼저 가져온 뒤 진행. ActivityCounter 는
+        활동 안내 메일에서만 필요하지만 두 경우 모두 같이 넘김 — 검색 다이얼로그
+        와 마찬가지 패턴.
+        """
+        if not self.mail_sender.enabled:
+            speak("rtgreen 아이디로 로그인한 경우에만 사용할 수 있습니다.")
+            wx.MessageBox(
+                f"안내 메일 발송은 '{self.mail_sender.SENDER_USER_ID}' 아이디로 "
+                "로그인한 경우에만 사용할 수 있습니다.\n"
+                f"현재 로그인 아이디: {self.admin_user_id}",
+                "rtgreen 전용 기능", wx.OK | wx.ICON_WARNING,
+            )
+            return
+        members = self._cached_members
+        if not members:
+            wx.MessageBox(
+                "회원 목록이 비어 있습니다. 먼저 'Ctrl+F' 회원 검색을 한 번 "
+                "열어 회원 목록을 불러온 뒤 다시 시도해 주세요.",
+                "회원 목록 필요", wx.OK | wx.ICON_INFORMATION,
+            )
+            return
+        dlg = NudgeMailDialog(
+            self,
+            kind=kind,
+            members=members,
+            mail_sender=self.mail_sender,
+            history=self.nudge_history,
+            admin_user_id=self.admin_user_id,
+            activity_counter=ActivityCounter(self.session),
+            log_writer=self.log_writer,
+        )
+        try:
+            dlg.ShowModal()
+        finally:
+            dlg.Destroy()
+
+    def on_nudge_activity(self, event=None) -> None:
+        from core.nudge_history import KIND_ACTIVITY_NUDGE
+        self._open_nudge_dialog(KIND_ACTIVITY_NUDGE)
+
+    def on_nudge_inactive_warn(self, event=None) -> None:
+        from core.nudge_history import KIND_INACTIVE_WARNING
+        self._open_nudge_dialog(KIND_INACTIVE_WARNING)
 
     # ---------- 회원 검색 ----------
 

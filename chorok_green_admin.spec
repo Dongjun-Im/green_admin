@@ -87,6 +87,9 @@ a = Analysis(
         'core.nas_log_txt',
         'core.nas_log_xlsx',
         'core.nas_log_html',
+        # core 패키지 — 안내 메일 (v1.2.10)
+        'core.nudge_history',
+        'core.nudge_mail',
         # core 패키지 — 자료실 구독비 관리
         'core.toss_xlsx',
         'core.payment_store',
@@ -127,6 +130,8 @@ a = Analysis(
         # ui 패키지 — 자료실(NAS) 접속 로그
         'ui.nas_log_dialog',
         'ui.nas_log_export_dialog',
+        # ui 패키지 — 안내 메일 (v1.2.10)
+        'ui.nudge_dialog',
         # ui 패키지 (v1.0 신규)
         'ui.level_history_dialog',
         # ui 패키지 — 자료실 구독비 관리

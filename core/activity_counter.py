@@ -114,6 +114,17 @@ class ActivityCounter:
             )
         return ma
 
+    def fetch_post_count(
+        self,
+        user_id: str,
+        board: str,
+        *,
+        since: Optional[date] = None,
+    ) -> Optional[int]:
+        """글 수만 가져오는 가벼운 경로. 댓글은 조회 안 함 — 활동 안내 메일
+        대상(6개월 글 없음) 판정처럼 글 수만 필요할 때 사용. 실패 시 None."""
+        return self._fetch_posts(user_id, board, since=since)
+
     def fetch_many(
         self,
         user_ids: list[str],
