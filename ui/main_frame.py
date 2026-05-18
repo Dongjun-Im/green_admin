@@ -67,6 +67,7 @@ from ui.log_viewer_dialog import LogViewerDialog
 from ui.mail_dialog import ManualMailDialog
 from ui.mvp_dialog import MvpDialog
 from ui.board_dialog import BoardAdminDialog
+from ui.expiry_reminder_dialog import ExpiryReminderDialog
 from ui.nas_log_dialog import NasLogDialog
 from ui.nudge_dialog import NudgeMailDialog
 from ui.payment_dialog import PaymentDialog
@@ -133,6 +134,9 @@ ID_NAS_LOG = wx.NewIdRef()
 # v1.2.10: 안내 메일(nudge) — green3 6개월 글 없음 / 1년+ 미접속 경고.
 ID_NUDGE_ACTIVITY = wx.NewIdRef()
 ID_NUDGE_INACTIVE_WARN = wx.NewIdRef()
+# v1.2.11: 자료실 구독 만료 조기 알림 — 7일/3일 전.
+ID_EXPIRY_REMIND_7 = wx.NewIdRef()
+ID_EXPIRY_REMIND_3 = wx.NewIdRef()
 
 
 class MainFrame(wx.Frame):
@@ -240,6 +244,14 @@ class MainFrame(wx.Frame):
             ID_NUDGE_INACTIVE_WARN,
             "장기미접속 사전 경고 메일 (1년+ 미접속)(&E)...",
         )
+        task_menu.Append(
+            ID_EXPIRY_REMIND_7,
+            "자료실 구독 만료 알림 — 7일 전(&7)...",
+        )
+        task_menu.Append(
+            ID_EXPIRY_REMIND_3,
+            "자료실 구독 만료 알림 — 3일 전(&3)...",
+        )
         task_menu.Append(ID_PAYMENTS, "자료실 구독비 관리(&P)...\tCtrl+P")
         task_menu.Append(ID_NAS_LOG, "자료실 접속 로그(&L)...")
         task_menu.Append(ID_BOARD_ADMIN, "게시판 관리 / 공지 작성(&W)...")
@@ -300,6 +312,8 @@ class MainFrame(wx.Frame):
         self.Bind(wx.EVT_MENU, self.on_board_admin, id=ID_BOARD_ADMIN)
         self.Bind(wx.EVT_MENU, self.on_nudge_activity, id=ID_NUDGE_ACTIVITY)
         self.Bind(wx.EVT_MENU, self.on_nudge_inactive_warn, id=ID_NUDGE_INACTIVE_WARN)
+        self.Bind(wx.EVT_MENU, self.on_expiry_remind_7, id=ID_EXPIRY_REMIND_7)
+        self.Bind(wx.EVT_MENU, self.on_expiry_remind_3, id=ID_EXPIRY_REMIND_3)
         self.Bind(wx.EVT_MENU, self.on_toggle_auto_adjust, id=ID_TOGGLE_AUTO_ADJUST)
         self.Bind(wx.EVT_MENU, self._on_close, id=wx.ID_EXIT)
 
@@ -672,6 +686,51 @@ class MainFrame(wx.Frame):
     def on_nudge_inactive_warn(self, event=None) -> None:
         from core.nudge_history import KIND_INACTIVE_WARNING
         self._open_nudge_dialog(KIND_INACTIVE_WARNING)
+
+    # ---------- 자료실 구독 만료 알림 (v1.2.11) ----------
+
+    def _open_expiry_reminder(self, days_before: int) -> None:
+        """7일 / 3일 전 만료 알림 메일 발송 공통 진입점."""
+        if not self.mail_sender.enabled:
+            speak("rtgreen 아이디로 로그인한 경우에만 사용할 수 있습니다.")
+            wx.MessageBox(
+                f"이 기능은 '{self.mail_sender.SENDER_USER_ID}' 아이디로 "
+                "로그인한 경우에만 사용할 수 있습니다.",
+                "rtgreen 전용 기능", wx.OK | wx.ICON_WARNING,
+            )
+            return
+        members = self._cached_members
+        if not members:
+            wx.MessageBox(
+                "회원 목록이 비어 있습니다. 먼저 'Ctrl+F' 회원 검색을 한 번 "
+                "열어 회원 목록을 불러온 뒤 다시 시도해 주세요.",
+                "회원 목록 필요", wx.OK | wx.ICON_INFORMATION,
+            )
+            return
+        # PaymentStore 는 lazy import — payment_dialog 가 처음 열릴 때 init 되는
+        # 인프라와 동일 DB 파일을 공유하므로 여기서 새 인스턴스를 만들어도 안전.
+        from core.payment_store import PaymentStore
+        store = PaymentStore()
+        dlg = ExpiryReminderDialog(
+            self,
+            days_before=days_before,
+            members=members,
+            payment_store=store,
+            mail_sender=self.mail_sender,
+            history=self.nudge_history,
+            admin_user_id=self.admin_user_id,
+            log_writer=self.log_writer,
+        )
+        try:
+            dlg.ShowModal()
+        finally:
+            dlg.Destroy()
+
+    def on_expiry_remind_7(self, event=None) -> None:
+        self._open_expiry_reminder(7)
+
+    def on_expiry_remind_3(self, event=None) -> None:
+        self._open_expiry_reminder(3)
 
     # ---------- 회원 검색 ----------
 

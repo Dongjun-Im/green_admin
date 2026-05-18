@@ -26,7 +26,16 @@ from typing import Optional
 # 메일 종류 — 새 종류 추가 시 여기 상수에 추가.
 KIND_ACTIVITY_NUDGE = "activity_nudge"
 KIND_INACTIVE_WARNING = "inactive_warning"
-ALL_KINDS = (KIND_ACTIVITY_NUDGE, KIND_INACTIVE_WARNING)
+# v1.2.11: 자료실 구독 만료 조기 알림 — 7일 전 / 3일 전 두 시점.
+# `when` 인자에 period_to(만료일) 를 저장해서 같은 만료일에 대해 두 번 안 보내도록.
+KIND_EXPIRY_REMINDER_7 = "expiry_reminder_7"
+KIND_EXPIRY_REMINDER_3 = "expiry_reminder_3"
+ALL_KINDS = (
+    KIND_ACTIVITY_NUDGE,
+    KIND_INACTIVE_WARNING,
+    KIND_EXPIRY_REMINDER_7,
+    KIND_EXPIRY_REMINDER_3,
+)
 
 
 class NudgeHistoryStore:
@@ -123,6 +132,15 @@ class NudgeHistoryStore:
             return False
         ref = today or date.today()
         return (ref - last).days < days
+
+    def was_sent_for(self, user_id: str, kind: str, target_date: date) -> bool:
+        """user_id 에게 kind 메일이 정확히 `target_date` 를 기록 키로 발송된 적 있는지.
+
+        v1.2.11: 구독 만료 알림처럼 '특정 이벤트(만료일) 에 대해 한 번만 보낸다'
+        는 정책에 사용. `mark_sent(uid, kind, when=period_to)` 로 만료일을
+        그대로 기록해 두고, 다음 발송 시도 시 이 함수로 중복 확인.
+        """
+        return self.last_sent(user_id, kind) == target_date
 
     def clear(self) -> None:
         """전체 이력 삭제 (테스트·재설정용)."""

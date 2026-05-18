@@ -92,6 +92,8 @@ a = Analysis(
         'core.nudge_mail',
         # core 패키지 — 운영자 대시보드 (v1.2.11)
         'core.dashboard_summary',
+        # core 패키지 — 구독 만료 조기 알림 (v1.2.11)
+        'core.expiry_reminder',
         # core 패키지 — 자료실 구독비 관리
         'core.toss_xlsx',
         'core.payment_store',
@@ -134,6 +136,8 @@ a = Analysis(
         'ui.nas_log_export_dialog',
         # ui 패키지 — 안내 메일 (v1.2.10)
         'ui.nudge_dialog',
+        # ui 패키지 — 구독 만료 조기 알림 (v1.2.11)
+        'ui.expiry_reminder_dialog',
         # ui 패키지 (v1.0 신규)
         'ui.level_history_dialog',
         # ui 패키지 — 자료실 구독비 관리
