@@ -350,6 +350,13 @@ class MainFrame(wx.Frame):
         btn_sizer.Add(info_btn, 0, wx.ALL, 5)
         sizer.Add(btn_sizer, 0, wx.ALIGN_CENTER | wx.ALL, 10)
 
+        # v1.2.11: wx.Button 은 EVT_BUTTON 이벤트를 발생시키므로 _build_menu 의
+        # EVT_MENU 바인딩만으로는 클릭이 안 잡힘 (메뉴/단축키만 동작했음).
+        # 같은 핸들러를 EVT_BUTTON 으로도 바인딩 — 메뉴와 버튼 모두 작동.
+        self.Bind(wx.EVT_BUTTON, self.on_backup_now, id=ID_BACKUP_NOW)
+        self.Bind(wx.EVT_BUTTON, self.on_adjust_preview, id=ID_ADJUST_PREVIEW)
+        self.Bind(wx.EVT_BUTTON, self.on_last_info, id=ID_LAST_INFO)
+
         panel.SetSizer(sizer)
         self._refresh_status()
 
