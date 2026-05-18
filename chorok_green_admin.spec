@@ -96,6 +96,8 @@ a = Analysis(
         'core.expiry_reminder',
         # core 패키지 — 헤드리스 작업 스케줄러 (v1.2.11)
         'core.scheduler_runner',
+        # core 패키지 — 스케줄러 등록/해제 (v1.3.1)
+        'core.scheduler_setup',
         # core 패키지 — 자료실 구독비 관리
         'core.toss_xlsx',
         'core.payment_store',
@@ -140,6 +142,8 @@ a = Analysis(
         'ui.nudge_dialog',
         # ui 패키지 — 구독 만료 조기 알림 (v1.2.11)
         'ui.expiry_reminder_dialog',
+        # ui 패키지 — 자동 스케줄러 관리 (v1.3.1)
+        'ui.scheduler_dialog',
         # ui 패키지 (v1.0 신규)
         'ui.level_history_dialog',
         # ui 패키지 — 자료실 구독비 관리

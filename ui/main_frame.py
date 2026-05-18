@@ -69,6 +69,7 @@ from ui.mvp_dialog import MvpDialog
 from ui.board_dialog import BoardAdminDialog
 from ui.expiry_reminder_dialog import ExpiryReminderDialog
 from ui.nas_log_dialog import NasLogDialog
+from ui.scheduler_dialog import SchedulerDialog
 from ui.nudge_dialog import NudgeMailDialog
 from ui.payment_dialog import PaymentDialog
 from ui.pending_member_dialog import PendingMemberDialog
@@ -137,6 +138,8 @@ ID_NUDGE_INACTIVE_WARN = wx.NewIdRef()
 # v1.2.11: 자료실 구독 만료 조기 알림 — 7일/3일 전.
 ID_EXPIRY_REMIND_7 = wx.NewIdRef()
 ID_EXPIRY_REMIND_3 = wx.NewIdRef()
+# v1.3.1: 자동 스케줄러 관리 GUI.
+ID_SCHEDULER_SETUP = wx.NewIdRef()
 
 
 class MainFrame(wx.Frame):
@@ -252,6 +255,10 @@ class MainFrame(wx.Frame):
             ID_EXPIRY_REMIND_3,
             "자료실 구독 만료 알림 — 3일 전(&3)...",
         )
+        task_menu.Append(
+            ID_SCHEDULER_SETUP,
+            "자동 스케줄러 관리(&Y)...",
+        )
         task_menu.Append(ID_PAYMENTS, "자료실 구독비 관리(&P)...\tCtrl+P")
         task_menu.Append(ID_NAS_LOG, "자료실 접속 로그(&L)...")
         task_menu.Append(ID_BOARD_ADMIN, "게시판 관리 / 공지 작성(&W)...")
@@ -314,6 +321,7 @@ class MainFrame(wx.Frame):
         self.Bind(wx.EVT_MENU, self.on_nudge_inactive_warn, id=ID_NUDGE_INACTIVE_WARN)
         self.Bind(wx.EVT_MENU, self.on_expiry_remind_7, id=ID_EXPIRY_REMIND_7)
         self.Bind(wx.EVT_MENU, self.on_expiry_remind_3, id=ID_EXPIRY_REMIND_3)
+        self.Bind(wx.EVT_MENU, self.on_scheduler_setup, id=ID_SCHEDULER_SETUP)
         self.Bind(wx.EVT_MENU, self.on_toggle_auto_adjust, id=ID_TOGGLE_AUTO_ADJUST)
         self.Bind(wx.EVT_MENU, self._on_close, id=wx.ID_EXIT)
 
@@ -731,6 +739,16 @@ class MainFrame(wx.Frame):
 
     def on_expiry_remind_3(self, event=None) -> None:
         self._open_expiry_reminder(3)
+
+    # ---------- 자동 스케줄러 관리 (v1.3.1) ----------
+
+    def on_scheduler_setup(self, event=None) -> None:
+        """Windows 작업 스케줄러 등록/해제 GUI 를 연다."""
+        dlg = SchedulerDialog(self)
+        try:
+            dlg.ShowModal()
+        finally:
+            dlg.Destroy()
 
     # ---------- 회원 검색 ----------
 
