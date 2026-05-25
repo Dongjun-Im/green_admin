@@ -110,69 +110,79 @@ def unregister_task(task_key: str) -> tuple[bool, str]:
 
 
 def _parse_schtasks_query_block(block_text: str) -> dict:
-    """schtasks /Query /FO LIST /V 한 블록의 key:value 를 dict 로."""
+    """schtasks /Query /FO LIST /V 한 블록의 key:value 를 dict 로.
+
+    한국어 Windows 의 schtasks 출력은 ':' 가 영문 콜론(:) 또는 한국어 콜론(：)
+    둘 다 쓸 수 있어 양쪽 모두 split 대상으로.
+    """
     fields: dict[str, str] = {}
     for line in block_text.splitlines():
-        if ":" not in line:
+        # 한국어 콜론(／／／) 도 영문 콜론으로 통일.
+        normalized = line.replace("：", ":")
+        if ":" not in normalized:
             continue
-        k, v = line.split(":", 1)
+        k, v = normalized.split(":", 1)
         fields[k.strip()] = v.strip()
     return fields
 
 
-def query_status() -> list[TaskStatus]:
-    """모든 알려진 작업의 등록 상태를 한 번에 조회.
+# v1.3.2: 한국어/영문 schtasks 출력의 필드명 별칭. 운영 환경(한국어 Windows)
+# 에서 영문 키만 찾던 버그 회귀 방지.
+_FIELD_NEXT_RUN_KEYS = (
+    "다음 실행 시간",
+    "Next Run Time",
+)
+_FIELD_LAST_RESULT_KEYS = (
+    "마지막 결과",
+    "Last Result",
+)
 
-    각 작업이 등록돼 있지 않으면 registered=False 로 채워서 항상 같은 길이
-    리스트를 돌려준다 (UI 가 표시할 항목 수가 일정해지도록).
-    schtasks 호출 자체가 실패하면 모두 registered=False.
+
+def _lookup(fields: dict, keys) -> str:
+    """fields 에서 keys 중 처음 매칭되는 값. 못 찾으면 빈 문자열."""
+    for k in keys:
+        v = fields.get(k)
+        if v:
+            return v
+    return ""
+
+
+def _query_one(task_key: str) -> TaskStatus:
+    """작업 한 개의 등록 상태를 schtasks /Query /TN 으로 직접 확인.
+
+    이전엔 전체 /Query 출력을 파싱했으나 한국어 Windows 에서 'TaskName' 영문
+    필드를 못 찾아 등록된 작업도 미등록으로 표시되는 버그가 있었음. 작업당
+    1회 /TN 호출로 바꾸면:
+      · 종료 코드 0  → 등록됨 (필드에서 다음 실행 시간·마지막 결과 추출)
+      · 종료 코드 ≠0 → 미등록 (한국어/영문 메시지 모두 무시)
     """
-    out: dict[str, TaskStatus] = {
-        key: TaskStatus(
-            task_key=key,
-            description=DEFAULT_SCHEDULES[key][3],
-            registered=False,
-            raw_task_name=task_name(key),
-        )
-        for key in DEFAULT_SCHEDULES
-    }
-    r = subprocess.run(
-        ["schtasks.exe", "/Query", "/FO", "LIST", "/V"],
-        capture_output=True, text=True, errors="replace",
+    name = task_name(task_key)
+    desc = DEFAULT_SCHEDULES[task_key][3]
+    base = TaskStatus(
+        task_key=task_key, description=desc,
+        registered=False, raw_task_name=name,
     )
+    try:
+        r = subprocess.run(
+            ["schtasks.exe", "/Query", "/TN", name, "/FO", "LIST", "/V"],
+            capture_output=True, text=True, errors="replace",
+        )
+    except OSError:
+        return base
     if r.returncode != 0:
-        return list(out.values())
+        # 한국어/영문 모두 '찾을 수 없음' 류 메시지 — 등록 안 됨으로 처리.
+        return base
+    fields = _parse_schtasks_query_block(r.stdout)
+    base.registered = True
+    base.next_run = _lookup(fields, _FIELD_NEXT_RUN_KEYS)
+    base.last_result = _lookup(fields, _FIELD_LAST_RESULT_KEYS)
+    return base
 
-    block: list[str] = []
-    for line in r.stdout.splitlines():
-        if line.strip():
-            block.append(line)
-            continue
-        # 빈 줄 = 블록 경계
-        if block:
-            joined = "\n".join(block)
-            if TASK_NAME_PREFIX in joined:
-                fields = _parse_schtasks_query_block(joined)
-                # TaskName: "\ChorokGreenAdmin_activity_nudge" 형태
-                full_name = (
-                    fields.get("TaskName")
-                    or fields.get("HostName")  # 일부 환경
-                    or ""
-                )
-                # \ChorokGreenAdmin_xxx 또는 ChorokGreenAdmin_xxx 둘 다.
-                bare = full_name.lstrip("\\")
-                if bare.startswith(TASK_NAME_PREFIX):
-                    key = bare[len(TASK_NAME_PREFIX):]
-                    if key in out:
-                        st = out[key]
-                        st.registered = True
-                        st.next_run = (
-                            fields.get("Next Run Time")
-                            or fields.get("다음 실행 시간", "")
-                        )
-                        st.last_result = (
-                            fields.get("Last Result")
-                            or fields.get("마지막 결과", "")
-                        )
-            block = []
-    return list(out.values())
+
+def query_status() -> list[TaskStatus]:
+    """모든 알려진 작업의 등록 상태를 작업당 한 번씩 schtasks 호출로 조회.
+
+    각 작업이 등록돼 있지 않으면 registered=False 로 채워 항상 같은 길이의
+    리스트를 돌려준다 (UI 가 표시할 항목 수가 일정해지도록).
+    """
+    return [_query_one(key) for key in DEFAULT_SCHEDULES]

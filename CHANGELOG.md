@@ -1,5 +1,28 @@
 # CHANGELOG
 
+## v1.3.2 (2026-05-19)
+
+### 수정 — 자동 스케줄러 관리 화면이 한국어 Windows 에서 등록 상태를 못 잡던 버그
+- v1.3.1 의 스케줄러 관리 다이얼로그는 작업을 등록해도 목록에 `.` (미등록) 으로
+  계속 보이는 문제가 있었음. 원인: `schtasks /Query /FO LIST /V` 의 전체 출력을
+  파싱했는데, 'TaskName' / 'Next Run Time' / 'Last Result' 영문 필드명만 찾고
+  한국어 Windows 의 '작업 이름' / '다음 실행 시간' / '마지막 결과' 표기를
+  못 잡아 등록된 작업도 미등록으로 표시됐음.
+- 수정 — 작업당 `schtasks /Query /TN ChorokGreenAdmin_<key>` 로 개별 조회:
+  · 종료 코드 0 → 등록됨 (필드에서 다음 실행 시각·마지막 결과 추출)
+  · 종료 코드 ≠0 → 미등록 (한국어/영문 메시지 모두 무시)
+  필드명 별칭(다음 실행 시간 / 마지막 결과 + Next Run Time / Last Result) 모두 인식.
+- 부수 — 전각 콜론(:) 도 split 대상에 포함 (한국어 IME 가 섞어 넣는 경우 대비).
+
+### 테스트
+- `tests/test_scheduler_setup.py` 13개: 한국어/영문 schtasks 출력 파싱, 전각
+  콜론 처리, _query_one 등록/미등록/OSError 분기, query_status 가 작업당 한
+  번씩만 호출, register/unregister 의 schtasks 인자 구성(MONTHLY 는 /D, DAILY
+  는 /D 없음, 미지원 키 거부, schtasks 실패 메시지 전파), DEFAULT_SCHEDULES
+  와 scheduler_runner.ALL_TASKS 일관성 회귀.
+- 총 pytest 585/585 통과.
+
+
 ## v1.3.1 (2026-05-19)
 
 ### 추가 — 자동 스케줄러 관리 GUI
