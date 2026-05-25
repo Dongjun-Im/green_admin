@@ -431,6 +431,16 @@ class MainFrame(wx.Frame):
         self.status_text.SetValue(text)
         self._refresh_dashboard()
 
+    def _set_cached_members(self, members) -> None:
+        """회원 목록 캐시 갱신 + 대시보드 즉시 갱신 (v1.3.3).
+
+        대시보드의 '신규 가입 대기' / '장기미접속 후보' 가 캐시에 의존하므로,
+        캐시가 바뀌면 대시보드도 같이 갱신해야 '?' 가 남지 않는다. 워커 스레드
+        에서 호출될 수 있어 wx.CallAfter 로 메인 스레드에서 갱신.
+        """
+        self._cached_members = members
+        wx.CallAfter(self._refresh_dashboard)
+
     def _refresh_dashboard(self) -> None:
         """대시보드 '오늘 해야 할 일' 위젯을 갱신 (v1.2.11).
 
@@ -772,7 +782,7 @@ class MainFrame(wx.Frame):
         except Exception as e:
             wx.CallAfter(self._report_error, f"수집 실패: {e}")
             return
-        self._cached_members = members
+        self._set_cached_members(members)
         wx.CallAfter(self._show_search_dialog, members)
 
     def _show_search_dialog(self, members) -> None:
@@ -796,6 +806,9 @@ class MainFrame(wx.Frame):
                 f"회원 검색에서 {dlg.changed_count}건의 등급이 수동 변경되었습니다."
             )
         dlg.Destroy()
+        # 검색 다이얼로그에서 등급 변경·탈퇴 처리 등으로 회원 상태가 바뀔 수 있으니
+        # 대시보드(가입 대기 / 장기미접속 후보) 도 같이 갱신.
+        self._refresh_dashboard()
 
     def on_promote_now(self, event=None) -> None:
         """게시물 기반 자동 승급 — 미리보기 단계로 진입.
@@ -820,7 +833,7 @@ class MainFrame(wx.Frame):
         except Exception as e:
             wx.CallAfter(self._report_error, f"수집 실패: {e}")
             return
-        self._cached_members = members
+        self._set_cached_members(members)
 
         # dry-run plan 생성 (사이트에는 아직 아무 변경 없음)
         try:
@@ -1750,7 +1763,7 @@ class MainFrame(wx.Frame):
         except Exception as e:
             wx.CallAfter(self._report_error, f"수집 실패: {e}")
             return
-        self._cached_members = members
+        self._set_cached_members(members)
         wx.CallAfter(self._show_pending_dialog, members, only_unseen)
 
     def _show_pending_dialog(self, members, only_unseen: bool) -> None:
@@ -1881,7 +1894,7 @@ class MainFrame(wx.Frame):
             return
 
         members, report, saved = dlg.result
-        self._cached_members = members
+        self._set_cached_members(members)
         if report.items:
             self.tracker.mark_mvp_done(top_n=len(report.items), quarter=report.quarter)
             self.log_writer.write_event(
@@ -1940,7 +1953,7 @@ class MainFrame(wx.Frame):
         except Exception as e:
             wx.CallAfter(self._report_error, f"수집 실패: {e}")
             return
-        self._cached_members = members
+        self._set_cached_members(members)
         wx.CallAfter(self._render_and_save_report, members)
 
     def _render_and_save_report(self, members) -> None:
