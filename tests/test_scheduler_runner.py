@@ -195,13 +195,82 @@ def test_all_tasks_constant():
         TASK_EXPIRY_REMIND_3,
         TASK_EXPIRY_REMIND_7,
         TASK_INACTIVE_WARNING,
+        TASK_POST_SCHEDULED,
     )
     assert set(ALL_TASKS) == {
         TASK_ACTIVITY_NUDGE, TASK_INACTIVE_WARNING,
         TASK_EXPIRY_REMIND_7, TASK_EXPIRY_REMIND_3,
+        TASK_POST_SCHEDULED,
     }
-    # 4개 — 새 작업 추가하면 이 테스트도 같이 갱신해야 함 (의도된 회귀 보호).
-    assert len(ALL_TASKS) == 4
+    # 5개 — 새 작업 추가하면 이 테스트도 같이 갱신해야 함 (의도된 회귀 보호).
+    assert len(ALL_TASKS) == 5
+
+
+# ---------------------------------------------------------------------------
+# 6b. 예약 공지 발송 (post_scheduled)
+# ---------------------------------------------------------------------------
+
+
+def _patch_notice_store(monkeypatch, tmp_path):
+    """ScheduledNoticeStore 기본 경로를 tmp 로 — 실제 data/ 안 건드림."""
+    path = tmp_path / "scheduled_notices.json"
+    monkeypatch.setattr("core.scheduled_notice.SCHEDULED_NOTICES_FILE", str(path))
+    return path
+
+
+def test_post_scheduled_no_due_is_success(monkeypatch, tmp_path):
+    _patch_data_dir(monkeypatch, tmp_path)
+    _patch_notice_store(monkeypatch, tmp_path)
+    from core.scheduler_runner import TASK_POST_SCHEDULED, _run_task_with_session
+
+    res = _run_task_with_session(
+        TASK_POST_SCHEDULED, session=MagicMock(), user_id="rtgreen",
+    )
+    assert res.success
+    assert res.targets == 0
+    assert "예약 없음" in res.message
+
+
+def test_post_scheduled_posts_due_and_marks(monkeypatch, tmp_path):
+    _patch_data_dir(monkeypatch, tmp_path)
+    _patch_notice_store(monkeypatch, tmp_path)
+    from datetime import datetime
+    from core.scheduled_notice import (
+        STATUS_POSTED,
+        ScheduledNotice,
+        ScheduledNoticeStore,
+    )
+    from core.scheduler_runner import TASK_POST_SCHEDULED, _run_task_with_session
+
+    # 1분 전으로 예약된(=도래한) 공지 한 건.
+    past = (datetime.now() - timedelta(minutes=1)).isoformat(timespec="seconds")
+    store = ScheduledNoticeStore()
+    store.add(ScheduledNotice(
+        scheduled_at=past, boards=["green1", "green3"],
+        subject="테스트 공지", content="본문",
+    ))
+
+    calls: list[tuple] = []
+
+    def fake_post(session, boards, subject, content, *, as_notice=True, use_html=False):
+        calls.append((tuple(boards), subject))
+        return [
+            SimpleNamespace(ok=True, bo_table=b, message="등록됨") for b in boards
+        ]
+    monkeypatch.setattr("core.board_admin.post_notice_to_boards", fake_post)
+
+    res = _run_task_with_session(
+        TASK_POST_SCHEDULED, session=MagicMock(), user_id="rtgreen",
+    )
+    assert res.success
+    assert res.targets == 1
+    assert res.sent == 1
+    assert res.failed == 0
+    assert calls and calls[0][0] == ("green1", "green3")
+    # 디스크에 posted 로 기록됐는지 다시 로드해 확인.
+    reloaded = ScheduledNoticeStore().all()
+    assert len(reloaded) == 1
+    assert reloaded[0].status == STATUS_POSTED
 
 
 # ---------------------------------------------------------------------------

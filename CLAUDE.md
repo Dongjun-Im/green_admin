@@ -28,6 +28,7 @@
     처리된 회원 아이디 명단. 재가입(대기 등급) 으로 다시 나타나면 승인 화면에서
     '승인' 버튼이 막힌다. `data/inactivity_withdrawn.json` 에 보관.
   - `level_history.py` (v1.0): 영구 등급 변경 이력 SQLite
+  - `scheduled_notice.py` (v1.4): 예약 공지 큐 저장소 (정해진 시각에 자동 게시)
   - `site_diagnostics.py` (v1.0): 사이트 구조 변경 감지·진단
   - `update_check.py` (v1.0): GitHub Releases 자동 업데이트 확인
   - `level_adjustment.py`: 장기 미접속 조정
@@ -53,6 +54,9 @@
   - `mvp_dialog.py` (v0.5): MVP TOP N 결과 표시
   - `pending_member_dialog.py` (v0.5): 가입자 승인 워크플로
   - `level_history_dialog.py` (v1.0): 영구 등급 변경 이력 뷰어
+  - `board_dialog.py`: 게시판 설정/공지 작성(즉시·예약)/게시물 관리
+  - `scheduler_dialog.py` (v1.3.1): 자동 스케줄러 관리
+  - `scheduled_notice_dialog.py` (v1.4): 예약 공지 목록 확인·취소·삭제
 - `tools/`: 개발자용 덤프·탐색 스크립트
 - `green_auth/`: 공용 인증 패키지 **번들 복사본** (원본 리포는 별도)
 
@@ -66,6 +70,7 @@
 - `data/inactivity_withdrawn.json` (v1.0.x) — 장기미접속 '탈퇴' 처리자 명단 (재가입 차단)
 - `data/level_history.db` (v1.0) — 영구 등급 변경 이력 SQLite
 - `data/last_update_check.json` (v1.0) — GitHub 업데이트 확인 캐시
+- `data/scheduled_notices.json` (v1.4) — 예약 공지 큐 (post_scheduled 작업이 발송)
 - `data/dumps/`, `data/logs/`
 - `backups/YYYY-MM-DD/` — 분기 백업
 - `backups/archives/` (v0.4) — 오래된 백업 zip 보관소

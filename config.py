@@ -33,6 +33,8 @@ BACKUPS_DIR = os.path.join(APP_DIR, "backups")
 SOUNDS_DIR = os.path.join(APP_DIR, "sounds")
 
 LAST_RUN_FILE = os.path.join(DATA_DIR, "last_run.json")
+# 예약 공지 큐 — 정해진 시각에 자동 발송할 공지 목록 (v1.4)
+SCHEDULED_NOTICES_FILE = os.path.join(DATA_DIR, "scheduled_notices.json")
 
 for _d in (DATA_DIR, LOGS_DIR, DUMPS_DIR, BACKUPS_DIR):
     os.makedirs(_d, exist_ok=True)

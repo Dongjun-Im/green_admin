@@ -29,6 +29,8 @@ DEFAULT_SCHEDULES: dict[str, tuple[str, str, str, str]] = {
                         "매일 09:00 — 7일 후 만료자 알림"),
     "expiry_remind_3": ("DAILY", "1", "09:00",
                         "매일 09:00 — 3일 후 만료자 알림"),
+    "post_scheduled": ("MINUTE", "10", "00:00",
+                       "약 10분마다 — 예약된 공지 자동 발송"),
 }
 
 
@@ -91,6 +93,9 @@ def register_task(task_key: str) -> tuple[bool, str]:
     ]
     if sch_type == "MONTHLY":
         args += ["/D", modifier]
+    elif sch_type in ("MINUTE", "HOURLY"):
+        # 반복 간격 — MINUTE 10 이면 10분마다 실행.
+        args += ["/MO", modifier]
     r = subprocess.run(args, capture_output=True, text=True, errors="replace")
     if r.returncode != 0:
         return False, (r.stderr or r.stdout or f"exit {r.returncode}").strip()

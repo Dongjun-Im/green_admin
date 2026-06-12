@@ -67,6 +67,7 @@ from ui.log_viewer_dialog import LogViewerDialog
 from ui.mail_dialog import ManualMailDialog
 from ui.mvp_dialog import MvpDialog
 from ui.board_dialog import BoardAdminDialog
+from ui.scheduled_notice_dialog import ScheduledNoticeDialog
 from ui.expiry_reminder_dialog import ExpiryReminderDialog
 from ui.nas_log_dialog import NasLogDialog
 from ui.scheduler_dialog import SchedulerDialog
@@ -140,6 +141,8 @@ ID_EXPIRY_REMIND_7 = wx.NewIdRef()
 ID_EXPIRY_REMIND_3 = wx.NewIdRef()
 # v1.3.1: 자동 스케줄러 관리 GUI.
 ID_SCHEDULER_SETUP = wx.NewIdRef()
+# v1.4: 예약 공지 목록 관리.
+ID_SCHEDULED_NOTICES = wx.NewIdRef()
 
 
 class MainFrame(wx.Frame):
@@ -262,6 +265,7 @@ class MainFrame(wx.Frame):
         task_menu.Append(ID_PAYMENTS, "자료실 구독비 관리(&P)...\tCtrl+P")
         task_menu.Append(ID_NAS_LOG, "자료실 접속 로그(&L)...")
         task_menu.Append(ID_BOARD_ADMIN, "게시판 관리 / 공지 작성(&W)...")
+        task_menu.Append(ID_SCHEDULED_NOTICES, "예약 공지 목록(&Q)...")
         task_menu.AppendSeparator()
         task_menu.Append(ID_UNDO_LAST, "마지막 작업 되돌리기(&Z)\tCtrl+Z")
         task_menu.AppendSeparator()
@@ -317,6 +321,7 @@ class MainFrame(wx.Frame):
         self.Bind(wx.EVT_MENU, self.on_payments, id=ID_PAYMENTS)
         self.Bind(wx.EVT_MENU, self.on_nas_log, id=ID_NAS_LOG)
         self.Bind(wx.EVT_MENU, self.on_board_admin, id=ID_BOARD_ADMIN)
+        self.Bind(wx.EVT_MENU, self.on_scheduled_notices, id=ID_SCHEDULED_NOTICES)
         self.Bind(wx.EVT_MENU, self.on_nudge_activity, id=ID_NUDGE_ACTIVITY)
         self.Bind(wx.EVT_MENU, self.on_nudge_inactive_warn, id=ID_NUDGE_INACTIVE_WARN)
         self.Bind(wx.EVT_MENU, self.on_expiry_remind_7, id=ID_EXPIRY_REMIND_7)
@@ -1345,6 +1350,14 @@ class MainFrame(wx.Frame):
         )
         dlg.ShowModal()
         dlg.Destroy()
+
+    def on_scheduled_notices(self, event=None) -> None:
+        """예약 공지 목록 — 예약한 공지 확인·취소·삭제."""
+        dlg = ScheduledNoticeDialog(self)
+        try:
+            dlg.ShowModal()
+        finally:
+            dlg.Destroy()
 
     def on_backup_diff(self, event=None) -> None:
         dlg = BackupDiffDialog(self)

@@ -38,11 +38,13 @@ TASK_ACTIVITY_NUDGE = "activity_nudge"
 TASK_INACTIVE_WARNING = "inactive_warning"
 TASK_EXPIRY_REMIND_7 = "expiry_remind_7"
 TASK_EXPIRY_REMIND_3 = "expiry_remind_3"
+TASK_POST_SCHEDULED = "post_scheduled"   # 예약 공지 자동 발송 (v1.4)
 ALL_TASKS = (
     TASK_ACTIVITY_NUDGE,
     TASK_INACTIVE_WARNING,
     TASK_EXPIRY_REMIND_7,
     TASK_EXPIRY_REMIND_3,
+    TASK_POST_SCHEDULED,
 )
 
 
@@ -246,12 +248,63 @@ def _send_expiry_kind(
     )
 
 
+def _post_scheduled_notices(session, user_id: str) -> TaskResult:
+    """예약 공지 큐에서 도래분을 찾아 게시판에 올린다 (v1.4)."""
+    from core.board_admin import post_notice_to_boards
+    from core.scheduled_notice import ScheduledNoticeStore
+
+    task_label = TASK_POST_SCHEDULED
+    store = ScheduledNoticeStore()
+    due = store.due()
+    log_event(task_label, f"start actor={user_id} due={len(due)}")
+    if not due:
+        log_event(task_label, "no_due — success")
+        return TaskResult(task=task_label, success=True,
+                          message="발송할 예약 없음", targets=0)
+
+    posted = failed = 0
+    for n in due:
+        try:
+            results = post_notice_to_boards(
+                session, n.boards, n.subject, n.content,
+                as_notice=n.as_notice, use_html=n.use_html,
+            )
+        except Exception as e:
+            failed += 1
+            store.mark_failed(n.id, f"예외: {e}")
+            log_event(task_label, f"post_failed id={n.id} err={e}")
+            continue
+        ok_n = sum(1 for r in results if r.ok)
+        summary = f"성공 {ok_n}/{len(results)} 게시판"
+        if ok_n == len(results) and results:
+            posted += 1
+            store.mark_posted(n.id, summary)
+            log_event(task_label, f"posted id={n.id} {summary}")
+        else:
+            failed += 1
+            detail = "; ".join(
+                f"{r.bo_table}:{r.message}" for r in results if not r.ok
+            )
+            store.mark_failed(n.id, f"{summary} ({detail})")
+            log_event(task_label, f"post_partial_fail id={n.id} {summary} {detail}")
+
+    log_event(task_label, f"done posted={posted} failed={failed}")
+    return TaskResult(
+        task=task_label, success=True, targets=len(due),
+        sent=posted, failed=failed,
+        message=f"예약 공지 발송 — 성공 {posted}건, 실패 {failed}건",
+    )
+
+
 def _run_task_with_session(task: str, session, user_id: str) -> TaskResult:
     """이미 로그인된 session 으로 task 실행. 테스트하기 좋은 진입점."""
     from core.nudge_history import (
         KIND_ACTIVITY_NUDGE,
         KIND_INACTIVE_WARNING,
     )
+
+    if task == TASK_POST_SCHEDULED:
+        return _post_scheduled_notices(session, user_id)
 
     crawler, mail_sender, nudge_history = _build_services(session, user_id)
     if task == TASK_ACTIVITY_NUDGE:
@@ -296,6 +349,14 @@ def run_task(task: str) -> int:
             f"지원하지 않는 작업: {task}. 지원값: {', '.join(ALL_TASKS)}\n"
         )
         return 1
+
+    # 예약 공지: 발송할 도래분이 없으면 로그인조차 하지 않고 가볍게 종료.
+    if task == TASK_POST_SCHEDULED:
+        from core.scheduled_notice import ScheduledNoticeStore
+        if not ScheduledNoticeStore().due():
+            log_event(task, "no_due — skip login")
+            sys.stdout.write("[post_scheduled] 발송할 예약 없음\n")
+            return 0
 
     # 1) 자격증명 + 로그인
     from green_auth.authenticator import AuthResult, Authenticator

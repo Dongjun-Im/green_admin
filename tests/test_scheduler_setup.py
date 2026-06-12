@@ -199,6 +199,21 @@ def test_register_task_builds_daily_args_without_modifier(monkeypatch):
     assert "/D" not in args
 
 
+def test_register_minute_task_includes_mo_modifier(monkeypatch):
+    """MINUTE 작업(post_scheduled)은 /SC MINUTE + /MO <간격> 가 들어가야 함."""
+    from core import scheduler_setup
+    captured = {}
+    def fake(args, **kw):
+        captured["args"] = args
+        return _fake_completed("성공\n", 0)
+    monkeypatch.setattr(scheduler_setup.subprocess, "run", fake)
+    scheduler_setup.register_task("post_scheduled")
+    args = captured["args"]
+    assert "/SC" in args and args[args.index("/SC") + 1] == "MINUTE"
+    assert "/MO" in args and args[args.index("/MO") + 1] == "10"
+    assert "/D" not in args
+
+
 def test_register_unknown_task_rejected(monkeypatch):
     from core import scheduler_setup
     # subprocess.run 이 호출되면 안 됨 — 호출되면 예외로 잡힘

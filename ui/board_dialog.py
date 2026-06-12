@@ -17,8 +17,10 @@ from __future__ import annotations
 
 import re
 import threading
+from datetime import datetime, timedelta
 
 import wx
+import wx.adv
 from wx.lib.scrolledpanel import ScrolledPanel
 
 from core.board_admin import (
@@ -36,6 +38,7 @@ from core.board_admin import (
     submit_board_form,
     write_post,
 )
+from core.scheduled_notice import ScheduledNotice, ScheduledNoticeStore
 from screen_reader import speak
 from ui.progress_dialog import ProgressTaskDialog
 
@@ -80,9 +83,11 @@ class BoardAdminDialog(wx.Dialog):
         # wx.Notebook 의 페이지탭을 일부 스크린리더가 "2/4" 처럼 잘못 세는 문제가 있어
         # 라디오 버튼('화면 선택') + wx.Simplebook(눈에 보이는 탭 없음) 조합으로 대체.
         sizer = wx.BoxSizer(wx.VERTICAL)
+        # 세로 단일 열(RA_SPECIFY_ROWS) — 가로 배치면 위/아래 화살표로 이동할 때
+        # 첫 항목으로 튀는 문제가 있어 세로로 둬 화살표가 항목 사이를 순서대로 이동하게.
         self.page_radio = wx.RadioBox(
             self, label="화면 선택(&P)", choices=list(self._PAGE_NAMES),
-            majorDimension=3, style=wx.RA_SPECIFY_COLS, name="화면 선택",
+            majorDimension=1, style=wx.RA_SPECIFY_ROWS, name="화면 선택",
         )
         self.page_radio.Bind(wx.EVT_RADIOBOX, self._on_page_changed)
         sizer.Add(self.page_radio, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 8)
@@ -216,6 +221,33 @@ class BoardAdminDialog(wx.Dialog):
         btn_row.Add(self.single_btn, 0, wx.RIGHT, 8)
         btn_row.Add(self.bulk_btn, 0)
         sz.Add(btn_row, 0, wx.ALIGN_RIGHT | wx.ALL, 8)
+
+        # 예약 발송 — 정해진 날짜·시각에 자동으로 올린다 (단일 게시판 + 일괄 대상 합쳐서).
+        sz.Add(wx.StaticText(page, label="[ 예약 발송 - 정해진 시각에 자동 게시 ]"),
+               0, wx.LEFT | wx.RIGHT | wx.TOP, 8)
+        sched_row = wx.BoxSizer(wx.HORIZONTAL)
+        sched_row.Add(wx.StaticText(page, label="예약 날짜:"),
+                      0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT | wx.RIGHT, 4)
+        default_dt = datetime.now() + timedelta(hours=1)
+        self.sched_date = wx.adv.DatePickerCtrl(
+            page, style=wx.adv.DP_DROPDOWN, name="예약 날짜",
+        )
+        self.sched_date.SetValue(_wxdate(default_dt))
+        sched_row.Add(self.sched_date, 0, wx.RIGHT, 8)
+        sched_row.Add(wx.StaticText(page, label="예약 시각:"),
+                      0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT | wx.RIGHT, 4)
+        self.sched_time = wx.adv.TimePickerCtrl(page, name="예약 시각")
+        self.sched_time.SetValue(_wxtime(default_dt))
+        sched_row.Add(self.sched_time, 0, wx.RIGHT, 8)
+        self.schedule_btn = wx.Button(page, label="예약 발송(&Y)")
+        self.schedule_btn.Bind(wx.EVT_BUTTON, self._on_schedule_notice)
+        sched_row.Add(self.schedule_btn, 0)
+        sz.Add(sched_row, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+        sz.Add(wx.StaticText(
+            page,
+            label="예약하면 약 10분마다 도는 자동 작업이 정해진 시각 이후 올려 줍니다. "
+                  "그 시각에 PC 가 켜져 있어야 합니다. '작업 - 예약 공지 목록' 에서 확인·취소.",
+        ), 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
 
         sz.Add(wx.StaticText(page, label="작성 결과(&R):"),
                0, wx.LEFT | wx.RIGHT, 8)
@@ -635,6 +667,113 @@ class BoardAdminDialog(wx.Dialog):
         speak(f"일괄 공지 완료. 성공 {ok_n}, 실패 {len(results) - ok_n}.")
         wx.MessageBox(text, "일괄 공지 결과", wx.OK | wx.ICON_INFORMATION, self)
 
+    # ---------- 공지: 예약 발송 ----------
+
+    def _all_notice_boards(self) -> list[str]:
+        """예약 대상 = 단일 게시판 입력 + 일괄 선택 + 추가 입력 (중복 제거, 순서 보존)."""
+        out: list[str] = []
+        single = self.single_bo_input.GetValue().strip()
+        if single:
+            out.append(single)
+        for b in self._selected_bulk_boards():
+            if b not in out:
+                out.append(b)
+        return out
+
+    def _read_schedule_dt(self) -> datetime | None:
+        """날짜 피커 + 시각 피커 → 파이썬 datetime (초는 0)."""
+        d = self.sched_date.GetValue()
+        t = self.sched_time.GetValue()
+        if not d.IsValid():
+            return None
+        hh, mm, _ss = t.GetHour(), t.GetMinute(), 0
+        return datetime(d.GetYear(), d.GetMonth() + 1, d.GetDay(), hh, mm, 0)
+
+    def _on_schedule_notice(self, _event=None) -> None:
+        boards = self._all_notice_boards()
+        subj, content, as_notice, use_html = self._notice_inputs()
+        if not boards:
+            wx.MessageBox(
+                "예약 발송: 대상 게시판을 정하세요. '단일 공지 게시판 아이디' 에 적거나 "
+                "위 '대상 게시판 선택' 에서 스페이스 키로 고르면 됩니다.",
+                "대상 필요", wx.OK | wx.ICON_INFORMATION, self,
+            )
+            return
+        if not subj:
+            wx.MessageBox("제목을 입력하세요.", "입력 필요",
+                          wx.OK | wx.ICON_INFORMATION, self)
+            return
+        dt = self._read_schedule_dt()
+        if dt is None:
+            wx.MessageBox("예약 날짜·시각이 올바르지 않습니다.", "입력 필요",
+                          wx.OK | wx.ICON_INFORMATION, self)
+            return
+        if dt <= datetime.now():
+            wx.MessageBox("예약 시각이 이미 지났습니다. 미래 시각으로 정해 주세요.",
+                          "시각 확인", wx.OK | wx.ICON_WARNING, self)
+            return
+        kind = "공지" if as_notice else "일반 글"
+        when = dt.strftime("%Y-%m-%d %H:%M")
+        listing = "\n".join(f"  - {b}" for b in boards)
+        ans = wx.MessageBox(
+            f"{when} 에 다음 {len(boards)}개 게시판으로 {kind} '{subj}' 을(를)\n"
+            f"자동 발송하도록 예약합니다:\n{listing}\n\n계속할까요?",
+            "예약 발송 확인", wx.YES_NO | wx.ICON_QUESTION | wx.NO_DEFAULT, self,
+        )
+        if ans != wx.YES:
+            return
+
+        notice = ScheduledNotice(
+            scheduled_at=dt.isoformat(timespec="seconds"),
+            boards=boards, subject=subj, content=content,
+            as_notice=as_notice, use_html=use_html,
+        )
+        try:
+            ScheduledNoticeStore().add(notice)
+        except Exception as e:
+            wx.MessageBox(f"예약 저장 실패: {e}", "오류", wx.OK | wx.ICON_ERROR, self)
+            return
+
+        sched_msg = self._ensure_scheduler_registered()
+        cur = self.notice_result.GetValue()
+        self.notice_result.SetValue(
+            (cur + "\n" if cur else "")
+            + f"[예약됨] {when} → {', '.join(boards)} : {subj}"
+        )
+        speak(f"{when} 으로 예약했습니다.")
+        wx.MessageBox(
+            f"{when} 에 자동 발송하도록 예약했습니다.\n"
+            f"대상 게시판: {', '.join(boards)}\n\n{sched_msg}",
+            "예약 완료", wx.OK | wx.ICON_INFORMATION, self,
+        )
+
+    @staticmethod
+    def _ensure_scheduler_registered() -> str:
+        """post_scheduled 자동 작업이 미등록이면 등록. 결과 안내 문구 반환."""
+        try:
+            from core.scheduler_setup import (
+                TASK_NAME_PREFIX,
+                query_status,
+                register_task,
+            )
+            statuses = query_status()
+            already = any(
+                st.task_key == "post_scheduled" and st.registered
+                for st in statuses
+            )
+            if already:
+                return ("자동 발송 작업이 이미 등록돼 있어, 그 시각에 PC 가 켜져 있으면 "
+                        "자동으로 올라갑니다.")
+            ok, msg = register_task("post_scheduled")
+            if ok:
+                return ("자동 발송 작업을 작업 스케줄러에 등록했습니다. "
+                        "그 시각에 PC 가 켜져 있으면 약 10분 안에 올라갑니다.")
+            return ("자동 발송 작업 등록에 실패했습니다(" + str(msg) + "). "
+                    "'작업 - 자동 스케줄러 관리' 에서 'post_scheduled' 를 직접 등록해 주세요.")
+        except Exception as e:  # noqa: BLE001
+            return ("자동 발송 작업 등록 중 문제가 생겼습니다(" + str(e) + "). "
+                    "'작업 - 자동 스케줄러 관리' 에서 직접 등록해 주세요.")
+
     # ---------- 게시물 관리: 목록 불러오기 ----------
 
     def _on_postlist_focus(self, event) -> None:
@@ -907,7 +1046,7 @@ class BoardAdminDialog(wx.Dialog):
     # ---------- 공통 ----------
 
     def _set_notice_busy(self, busy: bool) -> None:
-        for b in (self.single_btn, self.bulk_btn):
+        for b in (self.single_btn, self.bulk_btn, self.schedule_btn):
             if busy:
                 b.Disable()
             else:
@@ -917,6 +1056,20 @@ class BoardAdminDialog(wx.Dialog):
         speak(
             "게시판 관리 화면. 맨 위 '화면 선택' 라디오 버튼에서 '게시판 설정', '공지 작성', "
             "'게시물 관리' 중 하나를 고릅니다. '게시판 설정' 은 게시판 아이디를 넣고 불러와 "
-            "설정 항목을 고치는 화면, '공지 작성' 은 단일 또는 일괄 공지를 올리는 화면, "
+            "설정 항목을 고치는 화면, '공지 작성' 은 단일 또는 일괄 공지를 올리거나 예약하는 화면, "
             "'게시물 관리' 는 게시물 목록을 불러와 스페이스 키로 골라 복사, 이동, 삭제하는 화면입니다."
         )
+
+
+def _wxdate(dt: datetime) -> wx.DateTime:
+    """파이썬 datetime/date → wx.DateTime (날짜 부분)."""
+    return wx.DateTime.FromDMY(dt.day, dt.month - 1, dt.year)
+
+
+def _wxtime(dt: datetime) -> wx.DateTime:
+    """파이썬 datetime → wx.DateTime (시각 부분 — TimePickerCtrl 용)."""
+    t = wx.DateTime.FromDMY(dt.day, dt.month - 1, dt.year)
+    t.SetHour(dt.hour)
+    t.SetMinute(dt.minute)
+    t.SetSecond(0)
+    return t
