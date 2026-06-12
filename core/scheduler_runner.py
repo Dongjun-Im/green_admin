@@ -83,6 +83,20 @@ def log_event(task: str, line: str) -> None:
         pass
 
 
+def _safe_write(stream, text: str) -> None:
+    """stream 에 안전하게 출력.
+
+    창 모드(빌드 console=False) EXE 는 콘솔이 없어 sys.stdout / sys.stderr 가
+    None 이다. 그대로 .write() 하면 AttributeError 로 작업이 통째로 죽으므로
+    None 이거나 쓰기 실패 시 조용히 무시한다. (실제 기록은 log_event 가 담당.)
+    """
+    try:
+        if stream is not None:
+            stream.write(text)
+    except Exception:
+        pass
+
+
 # ---------------------------------------------------------------------------
 # 작업 실행
 # ---------------------------------------------------------------------------
@@ -345,8 +359,9 @@ def _run_task_with_session(task: str, session, user_id: str) -> TaskResult:
 def run_task(task: str) -> int:
     """저장된 자격증명으로 로그인 후 task 실행. 반환: 종료 코드(0/1)."""
     if task not in ALL_TASKS:
-        sys.stderr.write(
-            f"지원하지 않는 작업: {task}. 지원값: {', '.join(ALL_TASKS)}\n"
+        _safe_write(
+            sys.stderr,
+            f"지원하지 않는 작업: {task}. 지원값: {', '.join(ALL_TASKS)}\n",
         )
         return 1
 
@@ -355,7 +370,7 @@ def run_task(task: str) -> int:
         from core.scheduled_notice import ScheduledNoticeStore
         if not ScheduledNoticeStore().due():
             log_event(task, "no_due — skip login")
-            sys.stdout.write("[post_scheduled] 발송할 예약 없음\n")
+            _safe_write(sys.stdout, "[post_scheduled] 발송할 예약 없음\n")
             return 0
 
     # 1) 자격증명 + 로그인
@@ -363,8 +378,9 @@ def run_task(task: str) -> int:
     from green_auth.credentials import load_credentials
     creds = load_credentials()
     if creds is None:
-        sys.stderr.write(
-            "저장된 자격증명이 없습니다. 먼저 일반 모드로 한 번 로그인해 주세요.\n"
+        _safe_write(
+            sys.stderr,
+            "저장된 자격증명이 없습니다. 먼저 일반 모드로 한 번 로그인해 주세요.\n",
         )
         log_event(task, "abort no_credentials")
         return 1
@@ -373,7 +389,7 @@ def run_task(task: str) -> int:
     auth = Authenticator()
     result = auth.authenticate(user_id, password)
     if not result.is_success:
-        sys.stderr.write(f"로그인 실패: {result.message}\n")
+        _safe_write(sys.stderr, f"로그인 실패: {result.message}\n")
         log_event(task, f"abort login_failed status={result.status} msg={result.message}")
         return 1
 
@@ -381,7 +397,7 @@ def run_task(task: str) -> int:
     from core.permission import admin_permission_check
     ok, reason = admin_permission_check(auth.session, auth.user_id)
     if not ok:
-        sys.stderr.write(f"권한 거부: {reason}\n")
+        _safe_write(sys.stderr, f"권한 거부: {reason}\n")
         log_event(task, f"abort permission_denied reason={reason}")
         return 1
 
@@ -390,13 +406,15 @@ def run_task(task: str) -> int:
         res = _run_task_with_session(task, auth.session, auth.user_id)
     except Exception as e:
         tb = traceback.format_exc(limit=8)
-        sys.stderr.write(f"작업 중 예외: {e}\n{tb}\n")
+        _safe_write(sys.stderr, f"작업 중 예외: {e}\n{tb}\n")
         log_event(task, f"abort exception err={e}")
         return 1
 
-    # 결과 출력 (sys.stdout 으로 — schtasks 가 로그 파일로 캡처할 수 있도록).
+    # 결과 출력 — 콘솔(있으면) + 로그 파일 양쪽에. 창 모드 EXE 는 콘솔이 없어
+    # 로그 파일이 유일한 기록이 된다.
     summary = f"[{res.task}] {res.message}"
     if res.targets:
         summary += f" (대상 {res.targets}명)"
-    sys.stdout.write(summary + "\n")
+    log_event(task, f"result {res.message} targets={res.targets}")
+    _safe_write(sys.stdout, summary + "\n")
     return 0 if res.success else 1

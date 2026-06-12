@@ -274,6 +274,35 @@ def test_post_scheduled_posts_due_and_marks(monkeypatch, tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# 6c. 창 모드 EXE 회귀 — sys.stdout/stderr 가 None 이어도 죽지 않아야 함
+# ---------------------------------------------------------------------------
+
+
+def test_run_task_post_scheduled_no_due_with_none_streams(monkeypatch, tmp_path):
+    """console=False 빌드(창 모드 EXE)는 sys.stdout/stderr 가 None.
+    예약 도래분 없을 때 run_task 가 None.write 로 죽지 않고 0 을 반환해야 함."""
+    import sys
+    _patch_data_dir(monkeypatch, tmp_path)
+    _patch_notice_store(monkeypatch, tmp_path)  # 빈 큐
+    monkeypatch.setattr(sys, "stdout", None)
+    monkeypatch.setattr(sys, "stderr", None)
+    from core.scheduler_runner import run_task
+
+    # AttributeError('NoneType' object has no attribute 'write') 가 나면 실패.
+    assert run_task("post_scheduled") == 0
+
+
+def test_run_task_unknown_with_none_stderr(monkeypatch):
+    """미지원 작업 키 경로의 sys.stderr.write 도 None 안전해야 함."""
+    import sys
+    monkeypatch.setattr(sys, "stdout", None)
+    monkeypatch.setattr(sys, "stderr", None)
+    from core.scheduler_runner import run_task
+
+    assert run_task("nonsense_task") == 1
+
+
+# ---------------------------------------------------------------------------
 # 7. main.py 의 --task 인자 파싱
 # ---------------------------------------------------------------------------
 
