@@ -98,6 +98,8 @@ a = Analysis(
         'core.scheduler_runner',
         # core 패키지 — 스케줄러 등록/해제 (v1.3.1)
         'core.scheduler_setup',
+        # core 패키지 — 예약 공지 큐 (v1.4)
+        'core.scheduled_notice',
         # core 패키지 — 자료실 구독비 관리
         'core.toss_xlsx',
         'core.payment_store',
@@ -144,6 +146,8 @@ a = Analysis(
         'ui.expiry_reminder_dialog',
         # ui 패키지 — 자동 스케줄러 관리 (v1.3.1)
         'ui.scheduler_dialog',
+        # ui 패키지 — 예약 공지 목록 (v1.4)
+        'ui.scheduled_notice_dialog',
         # ui 패키지 (v1.0 신규)
         'ui.level_history_dialog',
         # ui 패키지 — 자료실 구독비 관리
