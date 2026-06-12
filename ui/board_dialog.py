@@ -20,7 +20,6 @@ import threading
 from datetime import datetime, timedelta
 
 import wx
-import wx.adv
 from wx.lib.scrolledpanel import ScrolledPanel
 
 from core.board_admin import (
@@ -83,11 +82,12 @@ class BoardAdminDialog(wx.Dialog):
         # wx.Notebook 의 페이지탭을 일부 스크린리더가 "2/4" 처럼 잘못 세는 문제가 있어
         # 라디오 버튼('화면 선택') + wx.Simplebook(눈에 보이는 탭 없음) 조합으로 대체.
         sizer = wx.BoxSizer(wx.VERTICAL)
-        # 세로 단일 열(RA_SPECIFY_ROWS) — 가로 배치면 위/아래 화살표로 이동할 때
-        # 첫 항목으로 튀는 문제가 있어 세로로 둬 화살표가 항목 사이를 순서대로 이동하게.
+        # majorDimension=1 + RA_SPECIFY_COLS → 한 줄에 1개씩 세로 배치.
+        # 이래야 위/아래 방향키로 라디오 항목 사이를 순서대로 이동한다.
+        # (RA_SPECIFY_ROWS 는 '1 행 = 가로' 라 화살표가 첫 항목으로 튄다 — mail_dialog 참고.)
         self.page_radio = wx.RadioBox(
             self, label="화면 선택(&P)", choices=list(self._PAGE_NAMES),
-            majorDimension=1, style=wx.RA_SPECIFY_ROWS, name="화면 선택",
+            majorDimension=1, style=wx.RA_SPECIFY_COLS, name="화면 선택",
         )
         self.page_radio.Bind(wx.EVT_RADIOBOX, self._on_page_changed)
         sizer.Add(self.page_radio, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 8)
@@ -223,21 +223,26 @@ class BoardAdminDialog(wx.Dialog):
         sz.Add(btn_row, 0, wx.ALIGN_RIGHT | wx.ALL, 8)
 
         # 예약 발송 — 정해진 날짜·시각에 자동으로 올린다 (단일 게시판 + 일괄 대상 합쳐서).
+        # 스크린리더가 읽도록 날짜·시각은 adv 피커 대신 일반 TextCtrl(+ 명확한 name).
+        default_dt = datetime.now() + timedelta(hours=1)
         sz.Add(wx.StaticText(page, label="[ 예약 발송 - 정해진 시각에 자동 게시 ]"),
                0, wx.LEFT | wx.RIGHT | wx.TOP, 8)
         sched_row = wx.BoxSizer(wx.HORIZONTAL)
-        sched_row.Add(wx.StaticText(page, label="예약 날짜:"),
+        sched_row.Add(wx.StaticText(page, label="예약 날짜 (2026-06-15 형식):"),
                       0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT | wx.RIGHT, 4)
-        default_dt = datetime.now() + timedelta(hours=1)
-        self.sched_date = wx.adv.DatePickerCtrl(
-            page, style=wx.adv.DP_DROPDOWN, name="예약 날짜",
+        self.sched_date = wx.TextCtrl(
+            page, value=default_dt.strftime("%Y-%m-%d"),
+            name="예약 날짜, 예: 2026-06-15",
         )
-        self.sched_date.SetValue(_wxdate(default_dt))
+        self.sched_date.SetMinSize(wx.Size(120, -1))
         sched_row.Add(self.sched_date, 0, wx.RIGHT, 8)
-        sched_row.Add(wx.StaticText(page, label="예약 시각:"),
+        sched_row.Add(wx.StaticText(page, label="예약 시각 (24시간제 14:30):"),
                       0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT | wx.RIGHT, 4)
-        self.sched_time = wx.adv.TimePickerCtrl(page, name="예약 시각")
-        self.sched_time.SetValue(_wxtime(default_dt))
+        self.sched_time = wx.TextCtrl(
+            page, value=default_dt.strftime("%H:%M"),
+            name="예약 시각, 24시간제, 예: 14:30",
+        )
+        self.sched_time.SetMinSize(wx.Size(80, -1))
         sched_row.Add(self.sched_time, 0, wx.RIGHT, 8)
         self.schedule_btn = wx.Button(page, label="예약 발송(&Y)")
         self.schedule_btn.Bind(wx.EVT_BUTTON, self._on_schedule_notice)
@@ -374,9 +379,10 @@ class BoardAdminDialog(wx.Dialog):
                 self.form_sizer.Add(ctrl, 0, wx.ALL, 4)
             elif f.kind == "radio":
                 choices = [t or v for v, t in f.options] or ["(옵션 없음)"]
+                # majorDimension=1 + RA_SPECIFY_COLS → 세로 1열, 위/아래 화살표로 이동.
                 ctrl = wx.RadioBox(
                     p, label=f.label or f.name, choices=choices,
-                    style=wx.RA_SPECIFY_ROWS, name=f.label or f.name,
+                    majorDimension=1, style=wx.RA_SPECIFY_COLS, name=f.label or f.name,
                 )
                 idx = next((i for i, (v, _t) in enumerate(f.options) if v == f.value), 0)
                 if 0 <= idx < ctrl.GetCount():
@@ -681,13 +687,14 @@ class BoardAdminDialog(wx.Dialog):
         return out
 
     def _read_schedule_dt(self) -> datetime | None:
-        """날짜 피커 + 시각 피커 → 파이썬 datetime (초는 0)."""
-        d = self.sched_date.GetValue()
-        t = self.sched_time.GetValue()
-        if not d.IsValid():
+        """'예약 날짜'(YYYY-MM-DD) + '예약 시각'(HH:MM) 텍스트 → 파이썬 datetime.
+        형식이 틀리면 None."""
+        date_str = self.sched_date.GetValue().strip()
+        time_str = self.sched_time.GetValue().strip()
+        try:
+            return datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
+        except ValueError:
             return None
-        hh, mm, _ss = t.GetHour(), t.GetMinute(), 0
-        return datetime(d.GetYear(), d.GetMonth() + 1, d.GetDay(), hh, mm, 0)
 
     def _on_schedule_notice(self, _event=None) -> None:
         boards = self._all_notice_boards()
@@ -705,8 +712,10 @@ class BoardAdminDialog(wx.Dialog):
             return
         dt = self._read_schedule_dt()
         if dt is None:
-            wx.MessageBox("예약 날짜·시각이 올바르지 않습니다.", "입력 필요",
-                          wx.OK | wx.ICON_INFORMATION, self)
+            wx.MessageBox(
+                "예약 날짜·시각 형식이 올바르지 않습니다.\n"
+                "날짜는 2026-06-15, 시각은 24시간제 14:30 형식으로 입력하세요.",
+                "입력 필요", wx.OK | wx.ICON_INFORMATION, self)
             return
         if dt <= datetime.now():
             wx.MessageBox("예약 시각이 이미 지났습니다. 미래 시각으로 정해 주세요.",
@@ -1059,17 +1068,3 @@ class BoardAdminDialog(wx.Dialog):
             "설정 항목을 고치는 화면, '공지 작성' 은 단일 또는 일괄 공지를 올리거나 예약하는 화면, "
             "'게시물 관리' 는 게시물 목록을 불러와 스페이스 키로 골라 복사, 이동, 삭제하는 화면입니다."
         )
-
-
-def _wxdate(dt: datetime) -> wx.DateTime:
-    """파이썬 datetime/date → wx.DateTime (날짜 부분)."""
-    return wx.DateTime.FromDMY(dt.day, dt.month - 1, dt.year)
-
-
-def _wxtime(dt: datetime) -> wx.DateTime:
-    """파이썬 datetime → wx.DateTime (시각 부분 — TimePickerCtrl 용)."""
-    t = wx.DateTime.FromDMY(dt.day, dt.month - 1, dt.year)
-    t.SetHour(dt.hour)
-    t.SetMinute(dt.minute)
-    t.SetSecond(0)
-    return t
